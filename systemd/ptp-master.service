@@ -1,0 +1,13 @@
+[Unit]
+Description=PTP Master Clock (ptp4l + phc2sys)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'ptp4l -i eth0 --masterOnly 1 --tx_timestamp_timeout 200 & phc2sys -s eth0 -c CLOCK_REALTIME -O 0 -w'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
