@@ -64,11 +64,12 @@ python3 controller/play.py /path/to/video.mp4 --loop --duration 3600
 ├── ARCHITECTURE.md      # Design rationale and alternatives considered
 ├── README.md            # This file
 ├── scripts/
-│   ├── install-deps.sh  # Install required packages
-│   ├── ptp-master.sh    # Start PTP master
-│   ├── ptp-slave.sh     # Start PTP slave
-│   ├── setup-pi.sh      # Full setup wizard
-│   └── test-hwdec.sh    # Test hardware decoding
+│   ├── install-deps.sh      # Install required packages
+│   ├── make_drift_test.sh   # Generate a sync drift test video
+│   ├── ptp-master.sh        # Start PTP master
+│   ├── ptp-slave.sh         # Start PTP slave
+│   ├── setup-pi.sh          # Full setup wizard
+│   └── test-hwdec.sh        # Test hardware decoding
 ├── controller/
 │   ├── server.py        # Sync server (runs on master)
 │   ├── client.py        # Sync client (runs on slaves)
@@ -79,6 +80,27 @@ python3 controller/play.py /path/to/video.mp4 --loop --duration 3600
     ├── ptp-slave.service
     └── sync-client.service
 ```
+
+## Drift Test Video
+
+Generate a test video designed to make sync drift immediately visible when played side-by-side on multiple screens:
+
+```bash
+./scripts/make_drift_test.sh [output.mp4] [duration_seconds]
+
+# Examples
+./scripts/make_drift_test.sh drift_test.mp4 600   # 10-minute test (default)
+./scripts/make_drift_test.sh drift_test.mp4 3600  # 1-hour test
+```
+
+The video contains four drift indicators:
+
+| Element | What to look for |
+|---|---|
+| **Corner panels** (top-left & top-right) | Toggle black/white at 2 Hz. In sync: both screens match. 1 frame off: one switches before the other. |
+| **Scrolling stripes** | Horizontal bands moving upward at 120 px/s. A phase offset between screens means the stripe edges don't line up horizontally. 1-frame drift = 4 px offset. |
+| **Second flash** | Full-screen brightness spike for ~3 frames at each second boundary. Staggered flashes = desync. |
+| **Timecode / Frame counter** | Read exact elapsed time and frame number to measure drift precisely. |
 
 ## Drift Correction
 
