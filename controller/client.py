@@ -411,6 +411,14 @@ class SyncClient:
                 f'--log-file={log_dir / "mpv.log"}',
                 f'--input-ipc-server={self.ipc_socket_path}',
             ]
+            # DRM_MODE env var sets the KMS output mode (overrides EDID negotiation).
+            # Format: <w>x<h>@<hz>  e.g. "3840x2160@25" for production projectors,
+            # "3440x1440@50" for a 21:9 dev monitor with 25fps content (50/25 = 2:1).
+            # Run: mpv --vo=drm --drm-mode=help /dev/null  to list available modes.
+            # Leave DRM_MODE unset to use the monitor's preferred mode.
+            drm_mode = os.environ.get('DRM_MODE', '')
+            if drm_mode:
+                cmd.append(f'--drm-mode={drm_mode}')
             if loop:
                 cmd.append('--loop')
             if start_position is not None and start_position > 0:

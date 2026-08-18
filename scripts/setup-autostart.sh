@@ -49,7 +49,7 @@ cat > "$INSTALL_DIR/autostart-client.sh" <<BASHEOF
 #!/bin/bash
 if [ "\$(tty)" = "/dev/tty1" ]; then
     mkdir -p $INSTALL_DIR/logs
-    source $INSTALL_DIR/config.env
+    set -a; source $INSTALL_DIR/config.env; set +a
     exec /usr/bin/python3 $INSTALL_DIR/controller/client.py --server "\$SERVER_IP" \\
         >> $INSTALL_DIR/logs/client.log 2>&1
 fi
