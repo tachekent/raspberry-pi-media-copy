@@ -31,13 +31,14 @@ sudo apt install -y \
     libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libswresample-dev libavfilter-dev \
     meson ninja-build pkg-config git \
-    libdrm-dev libv4l-dev \
+    libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev libv4l-dev \
     libass-dev libfreetype-dev libfontconfig-dev \
-    libzimg-dev \
+    libzimg-dev libuchardet-dev \
     libjpeg-dev zlib1g-dev \
     libvulkan-dev \
     libplacebo-dev \
-    liblua5.4-dev
+    liblua5.4-dev \
+    libpipewire-0.3-dev libpulse-dev
 
 # Add user to video + render groups (required for DRM master access on tty1)
 sudo usermod -aG video,render "$USER"
@@ -53,7 +54,7 @@ else
     git clone --depth=1 --branch "v$MPV_VERSION" https://github.com/mpv-player/mpv.git "$BUILD_DIR/mpv"
     (
         cd "$BUILD_DIR/mpv"
-        meson setup build --prefix=/usr/local
+        meson setup build --prefix=/usr/local -Ddrm=enabled
         ninja -C build
         sudo ninja -C build install
     )
