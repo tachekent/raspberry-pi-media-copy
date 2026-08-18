@@ -314,13 +314,34 @@ ffmpeg -i input.mov \
 | `keyint=60` | 60 frames | Keyframe every 2s at 30fps; shorter = faster drift-correction seeks |
 | `no-open-gop=1` | 1 | Closed GOP — more reliable seeking |
 
-### File size estimates (4K, 30fps)
+### Bitrate headroom on Pi 5
 
-| CRF | Approx bitrate | 40 min file size |
+The hardware HEVC decoder absorbs bitrate increases at near-zero CPU cost — increasing bitrate does not meaningfully raise CPU load. The bottleneck during 4K playback is software scaling (zimg, ~3 cores), not decoding.
+
+Measured on Pi 5 playing 4K@25fps with software scaling to 2560×1440:
+- mpv CPU: ~310% of 400% available (~77%), no dropped frames at 10 Mbps
+- SD card: 92 MB/s sustained read = 736 Mbps capacity; 10 Mbps video uses 1.4% of that
+- Practical bitrate ceiling before SD card becomes a bottleneck: well above anything a current encoder produces
+
+**10 Mbps is too low for 4K content with movement** — blockiness in motion is expected at that rate. Recommended targets:
+
+| Use case | Bitrate | CRF equiv | Notes |
+|---|---|---|---|
+| Minimum acceptable | 10 Mbps | ~24 | Blocky on fast motion |
+| Good quality | 25–30 Mbps | ~18–20 | Recommended starting point |
+| High quality | 40–50 Mbps | ~16–18 | No visible artefacts on motion |
+| Overkill | 80+ Mbps | ~14 | Blu-ray territory; Pi handles it fine |
+
+For a 40-minute loop at 30 Mbps: ~9 GB file. SD card reads it at ~5% of capacity.
+
+### File size estimates (4K, 25fps)
+
+| Bitrate | CRF equiv | 40 min file size |
 |---|---|---|
-| 22 | ~15 Mbps | ~4.5 GB |
-| 24 | ~10 Mbps | ~3 GB |
-| 26 | ~6 Mbps | ~1.8 GB |
+| ~10 Mbps | 24 | ~3 GB |
+| ~25 Mbps | 20 | ~7.5 GB |
+| ~40 Mbps | 18 | ~12 GB |
+| ~80 Mbps | 14 | ~24 GB |
 
 ### Exporting from DaVinci Resolve
 
@@ -338,8 +359,9 @@ On the **Deliver** page, use these settings:
 - Key Frames: **Every 60 frames** (adjust for your frame rate: 50 for 25fps, 60 for 30fps)
 
 **Quality**
-- Set `Restrict to` **10000 kbps** for good quality, or **6000 kbps** for smaller files
-- Alternatively use the Quality slider at around 60–70%
+- Set `Restrict to` **25000–40000 kbps** for good quality (see bitrate headroom section above)
+- 10000 kbps is the Resolve default but produces visible blockiness on motion at 4K
+- Alternatively use the Quality slider at around 75–85%
 
 > **Note:** If your Resolve project is HDR or uses a wide-gamut colour space, Resolve may default to 10-bit output. Override it explicitly in the codec advanced settings, or convert to Rec.709 before export. The Pi 5 will play HDR-graded content but the display and hardware decoder need 8-bit input.
 
