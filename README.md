@@ -251,6 +251,41 @@ If a Pi restarts during playback:
 
 This happens automatically when `--sync-interval` is enabled.
 
+---
+
+## Display Resolution
+
+`mpv --vo=drm` outputs at whatever resolution KMS has negotiated with the display. If that resolution doesn't match the video (e.g. 4K video on a 2560×1440 monitor), mpv does software scaling on the CPU — which causes frame drops on Pi 5 at 4K.
+
+**For production (projectors at 3840×2160):** force the KMS output to match the video so no scaling occurs:
+
+```bash
+# Find which HDMI connector is active
+ssh pipe@pi1.local "cat /sys/class/drm/card1-HDMI-A-*/status"
+# Look for the one that says "connected", e.g. HDMI-A-2
+
+# Append video= param to cmdline.txt (must stay one line)
+ssh pipe@pi1.local "sudo sed -i 's/$/ video=HDMI-A-2:3840x2160@30/' /boot/firmware/cmdline.txt"
+ssh pipe@pi2.local "sudo sed -i 's/$/ video=HDMI-A-2:3840x2160@30/' /boot/firmware/cmdline.txt"
+```
+
+After reboot, verify in mpv.log:
+```bash
+grep -a 'Window size' ~/pi-video-sync/logs/mpv.log
+# Should show: Window size: 3840x2160
+```
+
+If the display goes blank after reboot (unsupported mode), SSH in and remove the param:
+```bash
+sudo sed -i 's/ video=[^ ]*//' /boot/firmware/cmdline.txt && sudo reboot
+```
+
+> **Dev monitors:** If your monitors don't support 4K, use their highest native 16:9 resolution instead (e.g. `video=HDMI-A-2:2560x1440@60`). Scaling from 4K to 2560×1440 is a clean 1.5× ratio and uses much less CPU than scaling to an arbitrary ultrawide resolution.
+
+**TODO before gallery install:** Apply `video=HDMI-A-2:3840x2160@30` to both Pi cmdline.txt files once the production projectors are connected and confirmed to support that mode.
+
+---
+
 ## Encoding for Pi 5
 
 The Pi 5 hardware decoder supports **HEVC (H.265) Main profile, 8-bit, 4:2:0** up to 4K60. Encode to these specs for guaranteed hardware decode.
