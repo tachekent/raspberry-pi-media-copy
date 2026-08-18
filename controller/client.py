@@ -379,16 +379,23 @@ class SyncClient:
         print(f"Starting playback: {video}")
 
         if self.player == 'mpv':
+            log_dir = Path(__file__).parent.parent / 'logs'
+            log_dir.mkdir(exist_ok=True)
             cmd = [
-                'mpv',
-                '--hwdec=v4l2m2m',                      # Hardware HEVC decode (Pi 5)
+                '/usr/local/bin/mpv',
+                # Pi 5 + rpt1 ffmpeg: V4L2 HEVC stateless via /dev/media2 + /dev/video19.
+                # drm-copy = decode on hardware, copy frame to system RAM for --vo=drm display.
+                # Requires logind seat (DRM master) → must run from autologin tty1, NOT a systemd service.
+                # auto tries vaapi/vulkan/nvdec/vdpau first and wastes ~2s; pin the winner directly.
+                '--hwdec=drm-copy',
                 '--vo=drm',                             # Direct display — no compositor needed
                 '--fullscreen',
                 '--no-terminal',
                 '--no-osc',
                 '--no-input-terminal',
                 '--no-input-default-bindings',
-                f'--input-ipc-server={self.ipc_socket_path}',  # Enable IPC
+                f'--log-file={log_dir / "mpv.log"}',
+                f'--input-ipc-server={self.ipc_socket_path}',
             ]
             if loop:
                 cmd.append('--loop')

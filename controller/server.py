@@ -251,6 +251,21 @@ class SyncServer:
 
     def _command_loop(self):
         """Interactive command loop"""
+        import sys
+        if not sys.stdin.isatty():
+            # Running as a service with no interactive stdin — just wait for signals
+            print("Running in non-interactive mode")
+            try:
+                while self.running:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+            self.running = False
+            print("Server shutting down...")
+            self.tcp_socket.close()
+            self.udp_socket.close()
+            return
+
         print()
         print("Commands:")
         print("  play <path> [delay] [loop] [duration]  - Play video on all clients")

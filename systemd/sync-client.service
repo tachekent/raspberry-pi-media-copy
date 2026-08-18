@@ -12,10 +12,8 @@ ExecStart=/usr/bin/python3 /home/pipe/pi-video-sync/controller/client.py --serve
 Restart=on-failure
 RestartSec=5
 SupplementaryGroups=video render
-# Give mpv access to the display for --vo=drm
-StandardInput=tty
+StandardInput=null
 StandardOutput=journal
-TTYPath=/dev/tty1
 
 [Install]
 WantedBy=multi-user.target

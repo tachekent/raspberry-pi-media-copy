@@ -34,9 +34,39 @@ else
     sudo systemctl enable ptp-slave.service
 fi
 
-# 4. Install sync-client (both roles play video)
-sudo cp "$INSTALL_DIR/systemd/sync-client.service" "$SYSTEMD_DIR/"
-sudo systemctl enable sync-client.service
+# 4. Launch client via .bash_profile on tty1 autologin.
+#    This gives the process a logind seat → DRM master access → hwdec=drm works.
+#    A systemd service lacks a seat, so hwdec fails there.
+if systemctl is-enabled sync-client.service &>/dev/null 2>&1; then
+    sudo systemctl disable --now sync-client.service 2>/dev/null || true
+    echo "Disabled sync-client.service (replaced by .bash_profile autostart)"
+fi
+
+# Write the autostart helper (always overwritten so re-running setup picks up changes)
+cat > "$INSTALL_DIR/autostart-client.sh" <<BASHEOF
+#!/bin/bash
+if [ "\$(tty)" = "/dev/tty1" ]; then
+    mkdir -p $INSTALL_DIR/logs
+    source $INSTALL_DIR/config.env
+    exec /usr/local/bin/python3 $INSTALL_DIR/controller/client.py --server "\$SERVER_IP" \\
+        >> $INSTALL_DIR/logs/client.log 2>&1
+fi
+BASHEOF
+chmod +x "$INSTALL_DIR/autostart-client.sh"
+
+# Add a single source line to .bash_profile (idempotent)
+BASH_PROFILE="$HOME/.bash_profile"
+MARKER="# pi-video-sync client autostart"
+if ! grep -qF "$MARKER" "$BASH_PROFILE" 2>/dev/null; then
+    cat >> "$BASH_PROFILE" <<BASHEOF
+
+$MARKER
+source $INSTALL_DIR/autostart-client.sh
+BASHEOF
+    echo "Added client autostart to $BASH_PROFILE"
+else
+    echo "Client autostart already in $BASH_PROFILE (skipping)"
+fi
 
 # 5. Master-only: sync server + autoplay trigger
 if [ "$ROLE" = "master" ]; then
@@ -50,7 +80,7 @@ fi
 echo "Configuring headless boot..."
 sudo systemctl set-default multi-user.target
 
-# 7. Autologin for pi user on tty1 (needed for DRM display access)
+# 7. Autologin for pipe user on tty1 (needed for DRM display access)
 sudo mkdir -p "$SYSTEMD_DIR/getty@tty1.service.d"
 sudo tee "$SYSTEMD_DIR/getty@tty1.service.d/autologin.conf" > /dev/null <<EOF
 [Service]
