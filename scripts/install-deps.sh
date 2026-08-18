@@ -51,7 +51,7 @@ else
     git clone --depth=1 --branch "v$MPV_VERSION" https://github.com/mpv-player/mpv.git "$BUILD_DIR/mpv"
     (
         cd "$BUILD_DIR/mpv"
-        meson setup build --prefix=/usr/local
+        meson setup build --prefix=/usr/local -Dlibplacebo=disabled
         ninja -C build
         sudo ninja -C build install
     )
