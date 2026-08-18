@@ -35,7 +35,8 @@ sudo apt install -y \
     libass-dev libfreetype-dev libfontconfig-dev \
     libzimg-dev \
     libjpeg-dev zlib1g-dev \
-    libvulkan-dev
+    libvulkan-dev \
+    libplacebo-dev
 
 # Add user to video + render groups (required for DRM master access on tty1)
 sudo usermod -aG video,render "$USER"
@@ -51,7 +52,7 @@ else
     git clone --depth=1 --branch "v$MPV_VERSION" https://github.com/mpv-player/mpv.git "$BUILD_DIR/mpv"
     (
         cd "$BUILD_DIR/mpv"
-        meson setup build --prefix=/usr/local -Dlibplacebo=disabled
+        meson setup build --prefix=/usr/local
         ninja -C build
         sudo ninja -C build install
     )
