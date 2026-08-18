@@ -101,6 +101,12 @@ class SyncServer:
         handler_thread = threading.Thread(target=self._handle_clients, daemon=True)
         handler_thread.start()
 
+        # Snoop our own broadcast port so play.py commands update PlaybackState.
+        # play.py broadcasts directly without going through server.play(), so without
+        # this the sync broadcast loop never fires (is_playing() stays False).
+        udp_listener = threading.Thread(target=self._udp_listener_loop, daemon=True)
+        udp_listener.start()
+
         # Start sync broadcast thread if enabled
         if self.sync_interval > 0:
             sync_thread = threading.Thread(target=self._sync_broadcast_loop, daemon=True)
@@ -116,6 +122,37 @@ class SyncServer:
 
             if self.playback.is_playing():
                 self.broadcast(self.playback.to_dict())
+
+    def _udp_listener_loop(self):
+        """Snoop broadcast port to keep PlaybackState current from play.py commands"""
+        recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        recv.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        recv.bind(('', self.broadcast_port))
+        recv.settimeout(1.0)
+
+        while self.running:
+            try:
+                data, _ = recv.recvfrom(4096)
+                msg = json.loads(data.decode())
+                msg_type = msg.get('type')
+
+                if msg_type == 'play':
+                    self.playback.video = msg.get('video')
+                    self.playback.start_time = msg.get('start_at')
+                    self.playback.loop = msg.get('loop', False)
+                    self.playback.duration = msg.get('duration')
+                    print(f"[state] Playing: {self.playback.video}")
+                elif msg_type == 'stop':
+                    self.playback.clear()
+                    print("[state] Stopped")
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"UDP listener error: {e}")
+
+        recv.close()
 
     def _handle_clients(self):
         """Handle incoming client connections"""

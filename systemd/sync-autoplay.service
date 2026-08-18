@@ -1,7 +1,7 @@
 [Unit]
 Description=Video Sync Autoplay Trigger
-After=sync-server.service sync-client.service
-Wants=sync-server.service sync-client.service
+After=sync-server.service
+Wants=sync-server.service
 
 [Service]
 Type=oneshot
