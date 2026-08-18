@@ -251,6 +251,10 @@ class SyncClient:
             loop = message.get('loop', False)
             duration = message.get('duration')
 
+            # play.py broadcasts 3x for reliability — ignore duplicates
+            if start_at == self.start_time and video == self.current_video:
+                return
+
             print(f"Received play command: {video}")
             print(f"  Start at: {start_at}")
 
@@ -328,6 +332,9 @@ class SyncClient:
 
     def _start_at_position(self, video: str, start_time: float, loop: bool, duration: float = None):
         """Start playback at the correct position for sync"""
+        # Cancel any pending scheduled play (e.g. waiting 2s for a play command)
+        self._play_generation += 1
+
         now = time.time()
         position = now - start_time
 
@@ -352,26 +359,30 @@ class SyncClient:
 
         if wait_time < 0:
             print(f"Warning: Start time is in the past by {-wait_time:.3f}s")
-            # Start at correct position instead
             self._start_at_position(video, start_at, loop, self.duration)
             return
 
         print(f"Starting in {wait_time:.3f}s...")
 
-        # Stop any current playback
         self.stop_playback()
+        self._play_generation += 1
+        generation = self._play_generation
 
-        # Wait until start time
-        if wait_time > 0.01:
-            # Use a more precise wait for the final moments
-            if wait_time > 0.1:
-                time.sleep(wait_time - 0.1)
-            # Busy-wait for final precision
+        def _wait_and_play():
+            # Coarse sleep until 100ms before deadline
+            deadline = start_at - 0.1
+            while time.time() < deadline:
+                if self._play_generation != generation:
+                    return
+                time.sleep(0.05)
+            # Busy-wait final 100ms for sub-millisecond precision
             while time.time() < start_at:
-                pass
+                if self._play_generation != generation:
+                    return
+            if self._play_generation == generation:
+                self._play(video, loop)
 
-        # Start playback
-        self._play(video, loop)
+        threading.Thread(target=_wait_and_play, daemon=True).start()
 
     def _play(self, video: str, loop: bool, start_position: float = None):
         """Start video playback"""
