@@ -147,43 +147,50 @@ When `client.py` connects to the server's TCP port, the server returns the curre
 
 ---
 
-## Forcing 4K Output
+## Forcing Output Resolution and Refresh Rate
 
-By default, mpv's `--vo=drm` uses whatever KMS output mode the Pi has active. If the connected monitor auto-negotiates a lower resolution (e.g. 2560×1440 or 3440×1440), mpv does CPU-based software scaling — which causes frame drops on 4K content.
+By default, mpv's `--vo=drm` uses whatever mode the monitor negotiates via EDID. Two problems arise from this:
 
-Force the KMS output to 3840×2160 by adding a `video=` parameter to `/boot/firmware/cmdline.txt`:
+1. **Wrong resolution** — if the display is at a lower res than the video (e.g. 4K source on a 2560×1440 monitor), mpv does CPU software scaling, causing frame drops.
+2. **Wrong refresh rate** — if the display refresh rate doesn't divide evenly into the video frame rate (e.g. 60Hz display with 25fps video = 2.4:1), each video frame alternates between 2 and 3 display refreshes, causing cadence judder.
 
-```
-video=HDMI-A-2:3840x2160@30
-```
+### The fix: `DRM_MODE` in config.env
 
-**Find the correct connector name first:**
+Set `DRM_MODE` in each Pi's `config.env` to tell mpv which KMS mode to use:
+
 ```bash
-# List connectors
-ls /sys/class/drm/ | grep HDMI
-
-# Check which one is connected
-cat /sys/class/drm/card1-HDMI-A-*/status
+# In ~/pi-video-sync/config.env on each Pi:
+DRM_MODE=3840x2160@25   # production: projectors at native 4K, 25fps video
 ```
 
-The connected connector's name (e.g. `HDMI-A-1` or `HDMI-A-2`) maps to `card1-HDMI-A-1` or `card1-HDMI-A-2` in `/sys/class/drm/`.
+mpv's `--drm-mode` overrides EDID negotiation at playback time. It's per-Pi, requires no reboot, and takes effect whenever the client restarts.
 
-**Edit cmdline.txt** (it must remain a single line — no newlines):
+**List available modes** (run on the Pi):
 ```bash
-sudo sed -i 's/$/ video=HDMI-A-2:3840x2160@30/' /boot/firmware/cmdline.txt
+/usr/local/bin/mpv --vo=drm --drm-mode=help /dev/null 2>&1 | grep Mode
 ```
 
-**Verify after reboot:**
+Use the exact Hz value shown — mpv matches literally, so `@50` won't match `@49.99Hz`.
+
+**Verify after client restart:**
 ```bash
-grep -a 'Window size' ~/pi-video-sync/logs/mpv.log
-# Should show: Window size: 3840x2160
+grep -a 'FPS for display\|Window size' ~/pi-video-sync/logs/mpv.log | tail -4
+# Should show the target Hz and resolution
 ```
 
-**Fallback if display goes blank:** SSH in and remove the `video=` parameter:
-```bash
-sudo sed -i 's/ video=[^ ]*//' /boot/firmware/cmdline.txt
-sudo reboot
-```
+### Choosing the right mode
+
+| Situation | DRM_MODE value |
+|---|---|
+| Production projector, 4K, 25fps video | `3840x2160@25` |
+| Production projector, 4K, 30fps video | `3840x2160@30` |
+| 16:9 dev monitor, 25fps video | `2560x1440@60` (or find a 50Hz mode if available) |
+| 21:9 ultrawide dev monitor, 25fps video | `3440x1440@49.99` (50Hz equivalent — 2:1 ratio) |
+| Unset | Monitor's preferred/negotiated mode |
+
+### Why not `video=` in cmdline.txt?
+
+The `video=<connector>:<mode>` kernel parameter is documented as the way to force KMS output on Pi OS, but in practice the monitor's EDID negotiation wins even when the parameter is present in `/proc/cmdline`. `--drm-mode` is applied by mpv directly at the DRM/KMS level and reliably overrides it.
 
 ---
 

@@ -253,36 +253,33 @@ This happens automatically when `--sync-interval` is enabled.
 
 ---
 
-## Display Resolution
+## Display Resolution and Refresh Rate
 
-`mpv --vo=drm` outputs at whatever resolution KMS has negotiated with the display. If that resolution doesn't match the video (e.g. 4K video on a 2560×1440 monitor), mpv does software scaling on the CPU — which causes frame drops on Pi 5 at 4K.
+`mpv --vo=drm` uses whatever mode the monitor negotiates via EDID. This causes two problems if left unset:
 
-**For production (projectors at 3840×2160):** force the KMS output to match the video so no scaling occurs:
+- **Wrong resolution** → CPU software scaling → frame drops on 4K content
+- **Wrong refresh rate** → cadence judder (e.g. 60Hz display + 25fps video = 2.4:1 ratio; each frame alternates between 2 and 3 display refreshes)
+
+**Set `DRM_MODE` in each Pi's `config.env`** to force the right mode at playback time — no reboot needed, takes effect on next client restart:
 
 ```bash
-# Find which HDMI connector is active
-ssh pipe@pi1.local "cat /sys/class/drm/card1-HDMI-A-*/status"
-# Look for the one that says "connected", e.g. HDMI-A-2
-
-# Append video= param to cmdline.txt (must stay one line)
-ssh pipe@pi1.local "sudo sed -i 's/$/ video=HDMI-A-2:3840x2160@30/' /boot/firmware/cmdline.txt"
-ssh pipe@pi2.local "sudo sed -i 's/$/ video=HDMI-A-2:3840x2160@30/' /boot/firmware/cmdline.txt"
+# On each Pi, edit ~/pi-video-sync/config.env:
+DRM_MODE=3840x2160@25    # production projectors, 25fps video
 ```
 
-After reboot, verify in mpv.log:
+List available modes on a Pi:
 ```bash
-grep -a 'Window size' ~/pi-video-sync/logs/mpv.log
-# Should show: Window size: 3840x2160
+/usr/local/bin/mpv --vo=drm --drm-mode=help /dev/null 2>&1 | grep Mode
 ```
 
-If the display goes blank after reboot (unsupported mode), SSH in and remove the param:
+Use the exact Hz shown — mpv matches literally (`@50` won't match `@49.99Hz`).
+
+Verify it took effect:
 ```bash
-sudo sed -i 's/ video=[^ ]*//' /boot/firmware/cmdline.txt && sudo reboot
+grep -a 'FPS for display\|Window size' ~/pi-video-sync/logs/mpv.log | tail -4
 ```
 
-> **Dev monitors:** If your monitors don't support 4K, use their highest native 16:9 resolution instead (e.g. `video=HDMI-A-2:2560x1440@60`). Scaling from 4K to 2560×1440 is a clean 1.5× ratio and uses much less CPU than scaling to an arbitrary ultrawide resolution.
-
-**TODO before gallery install:** Apply `video=HDMI-A-2:3840x2160@30` to both Pi cmdline.txt files once the production projectors are connected and confirmed to support that mode.
+**TODO before gallery install:** Set `DRM_MODE=3840x2160@25` (or `@30`) in `config.env` on both Pis once the production projectors are connected. Check available modes first to confirm the projector supports it.
 
 ---
 
