@@ -37,7 +37,8 @@ sudo apt install -y \
     libjpeg-dev zlib1g-dev \
     libvulkan-dev \
     libplacebo-dev \
-    liblua5.4-dev \
+    liblua5.2-dev \
+    libdisplay-info-dev \
     libpipewire-0.3-dev libpulse-dev
 
 # Add user to video + render groups (required for DRM master access on tty1)
