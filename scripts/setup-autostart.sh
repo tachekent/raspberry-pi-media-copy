@@ -35,8 +35,10 @@ else
 fi
 
 # 4. Launch client via .bash_profile on tty1 autologin.
-#    This gives the process a logind seat → DRM master access → hwdec=drm works.
-#    A systemd service lacks a seat, so hwdec fails there.
+#    drm-copy uses the render node (/dev/dri/renderD128) — it does NOT need DRM master
+#    or a logind seat. A bare systemd service works too. We use .bash_profile because:
+#    - getty auto-restarts on crash (self-healing without a service)
+#    - gets a logind seat anyway, which is useful if hwdec method ever changes
 if systemctl is-enabled sync-client.service &>/dev/null 2>&1; then
     sudo systemctl disable --now sync-client.service 2>/dev/null || true
     echo "Disabled sync-client.service (replaced by .bash_profile autostart)"
