@@ -136,6 +136,9 @@ class SyncClient:
         self.loop: bool = False
         self.duration: Optional[float] = None
 
+        # Incremented on every new play/sync-start to cancel pending scheduled plays
+        self._play_generation = 0
+
         # mpv IPC for position control
         self.ipc_socket_path = f'/tmp/mpv-sync-{os.getpid()}.sock'
         self.mpv_ipc: Optional[MpvIPC] = None
@@ -384,9 +387,10 @@ class SyncClient:
             cmd = [
                 '/usr/local/bin/mpv',
                 # Pi 5 + rpt1 ffmpeg: V4L2 HEVC stateless via /dev/media2 + /dev/video19.
-                # drm-copy = decode on hardware, copy frame to system RAM for --vo=drm display.
-                # Requires logind seat (DRM master) → must run from autologin tty1, NOT a systemd service.
-                # auto tries vaapi/vulkan/nvdec/vdpau first and wastes ~2s; pin the winner directly.
+                # drm-copy: decode on hardware (render node /dev/dri/renderD128), copy frame to
+                # system RAM for --vo=drm display. Does NOT need DRM master / logind seat —
+                # works from both systemd services and autologin shell.
+                # Pin drm-copy explicitly: --hwdec=auto wastes ~2s probing vaapi/vulkan/nvdec/vdpau.
                 '--hwdec=drm-copy',
                 '--vo=drm',                             # Direct display — no compositor needed
                 '--fullscreen',
