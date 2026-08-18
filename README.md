@@ -36,7 +36,7 @@ Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) and choose **Ra
 Plug in the Pi and give it 30–60 seconds to boot. It will get a `192.168.2.x` address from the Mac via DHCP. SSH in:
 
 ```bash
-ssh pi@pi1.local   # mDNS hostname set in Imager
+ssh pipe@pi1.local   # mDNS hostname set in Imager
 ```
 
 If mDNS isn't resolving, find the IP from the Mac:
@@ -48,17 +48,17 @@ arp -a | grep 192.168.2
 Then SSH by IP:
 
 ```bash
-ssh pi@192.168.2.x
+ssh pipe@192.168.2.x
 ```
 
 ### 4. Copy files to the Pi
 
 ```bash
 # Copy this project (excludes .git)
-rsync -av --exclude='.git' . pi@pi1.local:~/pi-video-sync
+rsync -av --exclude='.git' . pipe@pi1.local:~/pi-video-sync
 
 # Copy a video file
-scp film.mp4 pi@pi1.local:~/
+scp film.mp4 pipe@pi1.local:~/
 ```
 
 > **No Internet Sharing?** If you booted the Pi without Internet Sharing enabled, it may have no IP on eth0. Switch it to DHCP and reconnect:
@@ -71,9 +71,70 @@ scp film.mp4 pi@pi1.local:~/
 
 ---
 
-## Quick Start
+## Autostart Setup (Production / Gallery)
 
-### 1. Install Dependencies (on each Pi)
+This is the recommended setup for installation use. The Pis boot headless, establish PTP sync, and start playing automatically. Power-cycling restarts everything cleanly — no keyboard or monitor needed after initial setup.
+
+### 1. Install dependencies (on each Pi)
+
+```bash
+./scripts/install-deps.sh
+```
+
+### 2. Copy your video
+
+```bash
+scp film.mp4 pipe@pi1.local:~/video.mp4
+scp film.mp4 pipe@pi2.local:~/video.mp4
+```
+
+### 3. Run the setup script
+
+**On the master Pi:**
+```bash
+./scripts/setup-autostart.sh master
+```
+
+**On the slave Pi:**
+```bash
+./scripts/setup-autostart.sh slave
+```
+
+This installs and enables the systemd services and configures headless boot.
+
+### 4. Edit config.env on each Pi
+
+The setup script creates `~/pi-video-sync/config.env` from the example. Edit it:
+
+```bash
+nano ~/pi-video-sync/config.env
+```
+
+| Setting | Master | Slave |
+|---|---|---|
+| `VIDEO` | `/home/pipe/video.mp4` | `/home/pipe/video.mp4` |
+| `DURATION` | length in seconds (e.g. `2400` for 40 min) | same |
+| `SERVER_IP` | leave blank | master's IP (e.g. `192.168.2.x`) |
+
+### 5. Reboot both Pis
+
+```bash
+sudo reboot
+```
+
+On boot, the sequence is:
+1. PTP establishes — slave locks to master clock (~10–30s)
+2. Both sync clients start listening for play commands
+3. Master waits 30s then broadcasts the play command
+4. Both screens start in sync
+
+---
+
+## Manual / Development Mode
+
+To run everything by hand (useful for testing):
+
+### 1. Install dependencies
 
 ```bash
 ./scripts/install-deps.sh
@@ -93,14 +154,10 @@ On each **slave** Pi:
 ./scripts/ptp-slave.sh
 ```
 
-### 3. Start the Sync Controller
+### 3. Start the sync controller
 
 On the **master** Pi:
 ```bash
-# Basic (no drift correction)
-python3 controller/server.py
-
-# With drift correction every 10 seconds (recommended for long videos)
 python3 controller/server.py --sync-interval 10
 ```
 
@@ -109,40 +166,39 @@ On each **slave** Pi:
 python3 controller/client.py --server <master-ip>
 ```
 
-### 4. Play a Video
+### 4. Play a video
 
-From the master Pi (or any connected client):
 ```bash
-python3 controller/play.py /path/to/video.mp4
-```
-
-For looping videos with drift correction:
-```bash
-python3 controller/play.py /path/to/video.mp4 --loop --duration 3600
+python3 controller/play.py /path/to/video.mp4 --loop --duration 2400
 ```
 
 ## Project Structure
 
 ```
 .
-├── ARCHITECTURE.md      # Design rationale and alternatives considered
-├── README.md            # This file
+├── ARCHITECTURE.md          # Design rationale and alternatives considered
+├── README.md                # This file
+├── config.env.example       # Copy to config.env and edit on each Pi
 ├── scripts/
 │   ├── install-deps.sh      # Install required packages
+│   ├── setup-autostart.sh   # Configure headless autostart (run once per Pi)
+│   ├── wait-ptp-lock.sh     # Wait for PTP to lock before autoplay
 │   ├── make_drift_test.sh   # Generate a sync drift test video
-│   ├── ptp-master.sh        # Start PTP master
-│   ├── ptp-slave.sh         # Start PTP slave
+│   ├── ptp-master.sh        # Start PTP master (manual mode)
+│   ├── ptp-slave.sh         # Start PTP slave (manual mode)
 │   ├── setup-pi.sh          # Full setup wizard
 │   └── test-hwdec.sh        # Test hardware decoding
 ├── controller/
-│   ├── server.py        # Sync server (runs on master)
-│   ├── client.py        # Sync client (runs on slaves)
-│   ├── play.py          # Command to trigger playback
-│   └── player.py        # Video player wrapper
+│   ├── server.py            # Sync server (runs on master)
+│   ├── client.py            # Sync client (runs on all Pis)
+│   ├── play.py              # Trigger playback
+│   └── player.py            # mpv wrapper
 └── systemd/
-    ├── ptp-master.service
-    ├── ptp-slave.service
-    └── sync-client.service
+    ├── ptp-master.service   # PTP grandmaster (master Pi)
+    ├── ptp-slave.service    # PTP slave (slave Pi)
+    ├── sync-server.service  # Sync server (master Pi)
+    ├── sync-client.service  # Sync client (all Pis)
+    └── sync-autoplay.service # Autoplay trigger (master Pi)
 ```
 
 ## Drift Test Video

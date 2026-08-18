@@ -55,7 +55,7 @@ sudo mkdir -p "$SYSTEMD_DIR/getty@tty1.service.d"
 sudo tee "$SYSTEMD_DIR/getty@tty1.service.d/autologin.conf" > /dev/null <<EOF
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin pi --noclear %I \$TERM
+ExecStart=-/sbin/agetty --autologin pipe --noclear %I \$TERM
 EOF
 
 sudo systemctl daemon-reload

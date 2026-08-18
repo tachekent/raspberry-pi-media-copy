@@ -6,11 +6,11 @@ Wants=sync-server.service sync-client.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-User=pi
-WorkingDirectory=/home/pi/pi-video-sync
-EnvironmentFile=/home/pi/pi-video-sync/config.env
-ExecStartPre=/home/pi/pi-video-sync/scripts/wait-ptp-lock.sh master
-ExecStart=/usr/bin/python3 /home/pi/pi-video-sync/controller/play.py ${VIDEO} --loop --duration ${DURATION} --delay 5
+User=pipe
+WorkingDirectory=/home/pipe/pi-video-sync
+EnvironmentFile=/home/pipe/pi-video-sync/config.env
+ExecStartPre=/home/pipe/pi-video-sync/scripts/wait-ptp-lock.sh master
+ExecStart=/usr/bin/python3 /home/pipe/pi-video-sync/controller/play.py ${VIDEO} --loop --duration ${DURATION} --delay 5
 
 [Install]
 WantedBy=multi-user.target
