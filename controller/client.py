@@ -391,7 +391,6 @@ class SyncClient:
                 '--vo=drm',                             # Direct display — no compositor needed
                 '--fullscreen',
                 '--no-terminal',
-                '--no-osc',
                 '--no-input-terminal',
                 '--no-input-default-bindings',
                 f'--log-file={log_dir / "mpv.log"}',

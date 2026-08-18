@@ -36,7 +36,8 @@ sudo apt install -y \
     libzimg-dev \
     libjpeg-dev zlib1g-dev \
     libvulkan-dev \
-    libplacebo-dev
+    libplacebo-dev \
+    liblua5.4-dev
 
 # Add user to video + render groups (required for DRM master access on tty1)
 sudo usermod -aG video,render "$USER"
