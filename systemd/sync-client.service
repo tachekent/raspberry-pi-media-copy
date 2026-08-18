@@ -1,17 +1,21 @@
 [Unit]
 Description=Video Sync Client
-After=network-online.target ptp-slave.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/pi-video-sync
-ExecStart=/usr/bin/python3 /home/pi/pi-video-sync/controller/client.py
+EnvironmentFile=/home/pi/pi-video-sync/config.env
+ExecStart=/usr/bin/python3 /home/pi/pi-video-sync/controller/client.py --server ${SERVER_IP}
 Restart=on-failure
 RestartSec=5
-# Allow access to video devices
 SupplementaryGroups=video render
+# Give mpv access to the display for --vo=drm
+StandardInput=tty
+StandardOutput=journal
+TTYPath=/dev/tty1
 
 [Install]
 WantedBy=multi-user.target

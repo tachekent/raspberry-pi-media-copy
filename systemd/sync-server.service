@@ -1,0 +1,15 @@
+[Unit]
+Description=Video Sync Server
+After=network-online.target ptp-master.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/pi-video-sync
+ExecStart=/usr/bin/python3 /home/pi/pi-video-sync/controller/server.py --sync-interval 10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

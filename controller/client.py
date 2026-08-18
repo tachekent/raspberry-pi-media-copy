@@ -382,11 +382,12 @@ class SyncClient:
             cmd = [
                 'mpv',
                 '--hwdec=v4l2m2m',                      # Hardware HEVC decode (Pi 5)
-                '--gpu-api=opengl',                     # Avoid Vulkan swapchain OOM in fullscreen
+                '--vo=drm',                             # Direct display — no compositor needed
                 '--fullscreen',
                 '--no-terminal',
-                '--no-osc',                             # No on-screen controller
+                '--no-osc',
                 '--no-input-terminal',
+                '--no-input-default-bindings',
                 f'--input-ipc-server={self.ipc_socket_path}',  # Enable IPC
             ]
             if loop:
