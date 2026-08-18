@@ -381,8 +381,8 @@ class SyncClient:
         if self.player == 'mpv':
             cmd = [
                 'mpv',
-                '--hwdec=drm',                          # Hardware HEVC decode
-                '--vo=drm',                             # Direct rendering (no X/Wayland)
+                '--hwdec=v4l2m2m',                      # Hardware HEVC decode (Pi 5)
+                '--gpu-api=opengl',                     # Avoid Vulkan swapchain OOM in fullscreen
                 '--fullscreen',
                 '--no-terminal',
                 '--no-osc',                             # No on-screen controller
@@ -420,7 +420,7 @@ class SyncClient:
             self.player_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=None,           # Let mpv errors print to terminal
                 preexec_fn=os.setsid  # Create new process group
             )
             print(f"Player started (PID: {self.player_process.pid})")

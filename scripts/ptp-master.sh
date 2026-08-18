@@ -30,14 +30,14 @@ PTP4L_PID=$!
 
 sleep 2
 
-echo "Starting phc2sys (sync system clock to PTP clock)..."
-# Sync system clock to PTP hardware clock
-# -s eth0: Source is PTP clock on eth0
-# -c CLOCK_REALTIME: Target is system clock
-# -O 0: No offset (both clocks use same epoch)
+echo "Starting phc2sys (sync PTP hardware clock from system clock)..."
+# On the master, sync the PHC *from* the system clock (not the other way around).
+# The system clock is the reference; ptp4l then distributes the PHC time to slaves.
+# -s CLOCK_REALTIME: Source is system clock
+# -c eth0: Target is PTP hardware clock on eth0
+# -O 0: No offset
 # -m: Print messages
-# -w: Wait for ptp4l to sync before starting
-sudo phc2sys -s "$INTERFACE" -c CLOCK_REALTIME -O 0 -m -w &
+sudo phc2sys -s CLOCK_REALTIME -c "$INTERFACE" -O 0 -m &
 PHC2SYS_PID=$!
 
 echo ""

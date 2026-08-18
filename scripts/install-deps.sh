@@ -7,7 +7,11 @@ set -e
 echo "=== Pi Video Sync: Installing Dependencies ==="
 
 # Update package list
-sudo apt update
+echo "Updating package list..."
+if ! sudo apt update; then
+    echo "ERROR: apt update failed — check your internet connection and try again."
+    exit 1
+fi
 
 # Install PTP tools
 echo "Installing PTP tools..."

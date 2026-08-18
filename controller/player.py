@@ -77,8 +77,7 @@ class VideoPlayer:
         if self.player == 'mpv':
             cmd = [
                 'mpv',
-                '--hwdec=drm',           # Hardware HEVC decode on Pi 5
-                '--vo=drm',              # Direct rendering (no X needed)
+                '--hwdec=auto',          # Auto-detect hardware decode (V4L2 on Pi 5)
                 '--no-terminal',
                 '--no-osc',
                 '--no-input-terminal',

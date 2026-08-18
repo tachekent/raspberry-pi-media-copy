@@ -47,7 +47,7 @@ ffmpeg -y \
   -f lavfi -i "color=c=0x1a1a1a:size=${W}x${H}:rate=${FPS}" \
   -vf "$VF" \
   -t "$DURATION" \
-  -c:v libx264 -crf 22 -preset fast -pix_fmt yuv420p \
+  -c:v libx265 -crf 24 -preset fast -pix_fmt yuv420p \
   "$OUTPUT"
 
 SIZE=$(du -sh "$OUTPUT" | cut -f1)
