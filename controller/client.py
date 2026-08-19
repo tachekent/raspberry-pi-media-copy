@@ -99,9 +99,12 @@ class MpvIPC:
             return result['data']
         return None
 
-    def seek(self, position: float, mode: str = 'absolute'):
-        """Seek to position"""
-        self._send_command(['seek', position, mode])
+    def seek(self, position: float):
+        """Seek to exact position (no keyframe snap)"""
+        # 'set_property time-pos' does an exact seek, unlike 'seek absolute'
+        # which snaps to the nearest keyframe. Keyframe snap causes ±600ms
+        # oscillation in drift corrections, making sync unreliable for HEVC.
+        self._send_command(['set_property', 'time-pos', position])
 
     def get_duration(self) -> Optional[float]:
         """Get video duration in seconds"""
@@ -334,7 +337,7 @@ class SyncClient:
         # Check if drift exceeds threshold
         if abs(drift) > self.drift_threshold:
             print(f"Sync: Drift {drift*1000:.1f}ms exceeds threshold, seeking to {expected_pos:.3f}s")
-            self.mpv_ipc.seek(expected_pos, 'absolute')
+            self.mpv_ipc.seek(expected_pos)
         else:
             # Optional: log small drift for debugging
             pass  # print(f"Sync: Drift {drift*1000:.1f}ms within threshold")
