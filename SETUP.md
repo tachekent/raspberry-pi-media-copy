@@ -159,6 +159,26 @@ The server rebroadcasts `T` and `DURATION` every 10 seconds (the sync interval).
 
 The IPC path: `client.py` connects to mpv's Unix socket (`/tmp/mpv-sync-<pid>.sock`) and sends JSON commands. `get_property time-pos` returns the current position; `set_property time-pos <pos>` corrects it.
 
+### mpv IPC desync bug (fixed 2026-08-19/20)
+
+For a long stretch this project's drift correction appeared to work sometimes and silently stop other times, with no errors — deeply confusing to debug because the symptom (large, unexplained, non-converging drift on one Pi but not the other) looked like a hardware/timing problem. It wasn't.
+
+mpv's JSON IPC stream interleaves **unsolicited event lines** (e.g. `{"event":"seek"}`, `{"event":"playback-restart"}`) with command responses on the same socket. The old `MpvIPC._send_command()` read until it saw the *first* newline and assumed that was the response. If an event line happened to arrive first, it read that instead, found no matching `request_id`, and returned `None` — and left the real response sitting unread in the socket buffer. Every subsequent call would then read the *previous* call's leftover response, which never matches its own `request_id` either, so it also returns `None`. Once desynced this way, a connection is broken **permanently** until reconnect — `get_position()` silently returns `None` forever, `_handle_sync()` hits `if actual_pos is None: return` before ever reaching the drift check, and no error is ever logged.
+
+This explains why it looked non-deterministic session to session: whether a connection got desynced depended on whether an unsolicited event happened to land at the wrong moment early in that connection's life — bad luck on some boots, fine on others.
+
+**Fix**: `_send_command()` now keeps a receive buffer that persists across calls, and reads complete lines from it, discarding anything whose `request_id` doesn't match the current call (event or stale leftover) instead of trusting the first line it sees.
+
+### Self-adjusting seek-latency compensation
+
+A separate, smaller effect: `set_property time-pos` returning success only means the seek was *queued* — mpv's hr-seek then decodes forward from the nearest keyframe to the exact target frame, which takes real wall-clock time (bounded by GOP size — currently 50 frames / 2s worst case). The old code computed the seek target before issuing the seek and never accounted for this, so every correction systematically undershot by roughly one seek's latency.
+
+`MpvIPC.seek()` now polls mpv's `seeking` property until the seek actually lands and returns how long that took. `SyncClient` keeps a running EWMA (`self.seek_latency_estimate`, 70/30 weighting) of that latency and adds it to the *next* correction's target position — so it self-calibrates from measured behavior instead of a hardcoded constant, and adapts if content, GOP position, or system load changes.
+
+### Known follow-up (not yet addressed)
+
+pi2 visibly jumps every ~10s to maintain sync — its underlying playback throughput has more inherent per-cycle variance than pi1's, so it needs a real correction almost every cycle (pi1, by contrast, often converges and needs none for many cycles in a row). The correction itself now works reliably and lands close to target, but the seek is still a visible jump on pi2, not a smooth catch-up. Worth investigating why pi2's variance is structurally higher than pi1's (both play different, differently-encoded footage — see "Cold Boot Clock Instability" above for the other known per-Pi asymmetry) before deciding whether this needs a fix or is acceptable as-is.
+
 ### Reconnect / late join
 
 When `client.py` connects to the server's TCP port, the server returns the current `PlaybackState` in the registration response. The client calls `_handle_sync()`, calculates the expected position (`(now - start_time) % DURATION`), and starts mpv at that position via `--start=<pos>`. This lets a Pi that reboots mid-playback rejoin immediately.
@@ -257,6 +277,10 @@ grep -a 'FPS for display\|Window size' ~/pi-video-sync/logs/mpv.log | tail -4
 | Unset | Monitor's preferred/negotiated mode |
 
 **Don't just pick the highest resolution — pick the mode whose refresh rate divides evenly into the content's fps.** Dev monitors on this project support 2560x1440, but only at ~60Hz (no 50Hz or 25Hz mode at that resolution — confirmed via `--drm-mode=help`). 60Hz against 25fps content is a 2.4:1 pulldown ratio: every video frame alternates between 2 and 3 display refreshes. Beyond the visible judder, this measurably increased mpv's CPU usage (250–340% observed) and caused large, erratic per-cycle drift corrections between the two Pis (200ms–1.5s, changing sign and magnitude each cycle) that never converged. Dropping to `1920x1080@50.00` (an exact 2:1 ratio, available on both dev monitors used here) cut mpv's CPU usage roughly in half and brought the drift-correction pattern from erratic to a stable, predictable sawtooth. This is a real trade-off (resolution vs. cadence) worth deciding deliberately per display — always run `mpv --vo=drm --drm-mode=help /dev/null` on the actual hardware first; don't assume the highest resolution mode is best.
+
+### `--video-sync=display-resample`
+
+Paired with `DRM_MODE`, `client.py` also passes `--video-sync=display-resample` to mpv. Without it, mpv paces frames using its own internal software timer rather than locking to the display's actual vsync pulses — even at a cadence-matched refresh rate, that timer can run at a slightly different rate than the system clock, showing up as smooth, drop-free playback that nonetheless drifts steadily against wall-clock time. `display-resample` ties frame pacing to real hardware vsync instead. Combined with the `DRM_MODE` fix above, this cut mpv's CPU usage further and turned the erratic multi-second drift into a small, well-behaved correction pattern (see "Sync Architecture" above for what's still open on top of this).
 
 ### Why not `video=` in cmdline.txt?
 

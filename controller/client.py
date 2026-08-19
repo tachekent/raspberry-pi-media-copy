@@ -29,6 +29,7 @@ class MpvIPC:
         self._socket: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._request_id = 0
+        self._recv_buffer = b''
 
     def connect(self) -> bool:
         """Connect to mpv's IPC socket"""
@@ -36,6 +37,7 @@ class MpvIPC:
             self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._socket.settimeout(1.0)
             self._socket.connect(self.socket_path)
+            self._recv_buffer = b''
             return True
         except Exception as e:
             self._socket = None
@@ -49,6 +51,7 @@ class MpvIPC:
             except:
                 pass
             self._socket = None
+        self._recv_buffer = b''
 
     def _send_command(self, command: list) -> Optional[dict]:
         """Send a command and get response"""
@@ -59,37 +62,47 @@ class MpvIPC:
         with self._lock:
             try:
                 self._request_id += 1
+                my_id = self._request_id
                 msg = json.dumps({
                     'command': command,
-                    'request_id': self._request_id
+                    'request_id': my_id
                 }) + '\n'
 
                 self._socket.send(msg.encode())
 
-                # Read response (may need multiple reads)
-                response_data = b''
-                while True:
-                    chunk = self._socket.recv(4096)
+                # mpv's IPC stream interleaves unsolicited event lines (e.g.
+                # {"event":"seek"}) with command responses. Stopping at the
+                # first newline — as this used to do — can read an event
+                # instead of the real response, and permanently desyncs every
+                # future call from then on (each one reads the previous call's
+                # leftover response, which never matches its own request_id,
+                # so get_position()/etc. silently return None forever until
+                # reconnect). Keep a buffer across calls and discard anything
+                # that isn't our request_id instead of trusting the first line.
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    while b'\n' in self._recv_buffer:
+                        line, self._recv_buffer = self._recv_buffer.split(b'\n', 1)
+                        try:
+                            data = json.loads(line)
+                        except Exception:
+                            continue
+                        if data.get('request_id') == my_id:
+                            return data
+                        # else: unsolicited event or a stale response — discard
+                    try:
+                        chunk = self._socket.recv(4096)
+                    except socket.timeout:
+                        continue
                     if not chunk:
                         break
-                    response_data += chunk
-                    if b'\n' in response_data:
-                        break
-
-                # Parse last complete line
-                lines = response_data.decode().strip().split('\n')
-                for line in reversed(lines):
-                    try:
-                        data = json.loads(line)
-                        if data.get('request_id') == self._request_id:
-                            return data
-                    except:
-                        continue
+                    self._recv_buffer += chunk
 
                 return None
 
             except Exception as e:
                 self._socket = None
+                self._recv_buffer = b''
                 return None
 
     def get_position(self) -> Optional[float]:
@@ -99,12 +112,27 @@ class MpvIPC:
             return result['data']
         return None
 
-    def seek(self, position: float):
-        """Seek to exact position (no keyframe snap)"""
+    def seek(self, position: float) -> float:
+        """Seek to exact position (no keyframe snap), waiting for it to land.
+
+        Returns the real wall-clock seconds the seek took to complete. mpv's IPC
+        ack for 'set_property time-pos' only means the seek was queued — hr-seek
+        then has to decode forward from the nearest keyframe, which is not
+        instant. Callers use the returned latency to compensate future corrections.
+        """
         # 'set_property time-pos' does an exact seek, unlike 'seek absolute'
         # which snaps to the nearest keyframe. Keyframe snap causes ±600ms
         # oscillation in drift corrections, making sync unreliable for HEVC.
+        t_start = time.time()
         self._send_command(['set_property', 'time-pos', position])
+        # Poll until the seek actually lands (bounded by GOP size — currently
+        # 50 frames / 2s worst case — so this loop resolves quickly in practice).
+        while time.time() - t_start < 2.0:
+            result = self._send_command(['get_property', 'seeking'])
+            if result and result.get('data') is False:
+                break
+            time.sleep(0.01)
+        return time.time() - t_start
 
     def get_duration(self) -> Optional[float]:
         """Get video duration in seconds"""
@@ -141,6 +169,12 @@ class SyncClient:
 
         # Incremented on every new play/sync-start to cancel pending scheduled plays
         self._play_generation = 0
+
+        # Running estimate (EWMA) of hr-seek latency — the real wall-clock time a
+        # correction seek takes to land. Starts at 0 and self-calibrates from
+        # measured seeks (see _handle_sync), so it adapts to content/hardware
+        # without needing a hardcoded value.
+        self.seek_latency_estimate = 0.0
 
         # mpv IPC for position control
         self.ipc_socket_path = f'/tmp/mpv-sync-{os.getpid()}.sock'
@@ -336,8 +370,19 @@ class SyncClient:
 
         # Check if drift exceeds threshold
         if abs(drift) > self.drift_threshold:
-            print(f"Sync: Drift {drift*1000:.1f}ms exceeds threshold, seeking to {expected_pos:.3f}s")
-            self.mpv_ipc.seek(expected_pos)
+            # Compensate for the seek's own latency: by the time an hr-seek lands,
+            # real time has advanced by however long decode-forward-to-target took.
+            # Predict that using the running estimate so the seek lands on target
+            # instead of systematically undershooting by ~one seek's latency.
+            target = expected_pos + self.seek_latency_estimate
+            if loop and duration and duration > 0:
+                target = target % duration
+            print(f"Sync: Drift {drift*1000:.1f}ms exceeds threshold, seeking to {target:.3f}s "
+                  f"(latency est: {self.seek_latency_estimate*1000:.1f}ms)")
+            latency = self.mpv_ipc.seek(target)
+            # EWMA update — adapts to changing seek cost (GOP position, content,
+            # system load) over time rather than trusting a single measurement.
+            self.seek_latency_estimate = 0.7 * self.seek_latency_estimate + 0.3 * latency
         else:
             # Optional: log small drift for debugging
             pass  # print(f"Sync: Drift {drift*1000:.1f}ms within threshold")
@@ -416,6 +461,7 @@ class SyncClient:
                 # Pin drm-copy explicitly: --hwdec=auto wastes ~2s probing vaapi/vulkan/nvdec/vdpau.
                 '--hwdec=drm-copy',
                 '--vo=drm',                             # Direct display — no compositor needed
+                '--video-sync=display-resample',       # Pace frames to real vsync, not mpv's software timer
                 '--fullscreen',
                 '--no-terminal',
                 '--no-input-terminal',
