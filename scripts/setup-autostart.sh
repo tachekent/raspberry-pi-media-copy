@@ -16,10 +16,16 @@ SYSTEMD_DIR=/etc/systemd/system
 
 echo "=== Setting up Pi Video Sync ($ROLE) ==="
 
-# 1. Create config.env if missing
+# 1. Create config.env if missing, then stamp ROLE into it
 if [ ! -f "$INSTALL_DIR/config.env" ]; then
     cp "$INSTALL_DIR/config.env.example" "$INSTALL_DIR/config.env"
     echo "Created config.env — edit VIDEO, DURATION, and SERVER_IP before rebooting."
+fi
+# Write/update ROLE so autostart-client.sh knows which PTP wait mode to use
+if grep -q '^ROLE=' "$INSTALL_DIR/config.env" 2>/dev/null; then
+    sed -i "s/^ROLE=.*/ROLE=$ROLE/" "$INSTALL_DIR/config.env"
+else
+    echo "ROLE=$ROLE" >> "$INSTALL_DIR/config.env"
 fi
 
 # 2. Make scripts executable
@@ -50,6 +56,7 @@ cat > "$INSTALL_DIR/autostart-client.sh" <<BASHEOF
 if [ "\$(tty)" = "/dev/tty1" ]; then
     mkdir -p $INSTALL_DIR/logs
     set -a; source $INSTALL_DIR/config.env; set +a
+    $INSTALL_DIR/scripts/wait-ptp-lock.sh "\$ROLE" >> $INSTALL_DIR/logs/client.log 2>&1
     exec /usr/bin/python3 $INSTALL_DIR/controller/client.py --server "\$SERVER_IP" \\
         >> $INSTALL_DIR/logs/client.log 2>&1
 fi

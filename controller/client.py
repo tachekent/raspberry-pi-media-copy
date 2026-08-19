@@ -419,6 +419,15 @@ class SyncClient:
             drm_mode = os.environ.get('DRM_MODE', '')
             if drm_mode:
                 cmd.append(f'--drm-mode={drm_mode}')
+            if os.environ.get('SYNC_OVERLAY', ''):
+                cmd.extend([
+                    '--osd-level=3',
+                    '--osd-msg1=${playback-time/full}  f${estimated-frame-number}',
+                    '--osd-font-size=72',
+                    '--osd-color=#FFFFFFFF',
+                    '--osd-back-color=#80000000',
+                    '--osd-border-size=2',
+                ])
             if loop:
                 cmd.append('--loop')
             if start_position is not None and start_position > 0:
