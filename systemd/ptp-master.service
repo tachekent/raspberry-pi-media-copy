@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c 'ptp4l -i eth0 --masterOnly 1 --tx_timestamp_timeout 200 & phc2sys -s CLOCK_REALTIME -c eth0 -O 0 -m'
+ExecStart=/usr/sbin/ptp4l -i eth0 -S --masterOnly 1
 Restart=on-failure
 RestartSec=5
 

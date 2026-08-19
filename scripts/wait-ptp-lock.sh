@@ -5,7 +5,7 @@
 #   slave:  polls until offsetFromMaster < threshold
 
 MODE="${1:-slave}"
-THRESHOLD=100000   # 100µs in nanoseconds
+THRESHOLD=2000000  # 2ms in nanoseconds (software PTP jitter ~50-200µs; 2ms << 1 frame at 25fps)
 CONSECUTIVE=3
 FIXED_WAIT=30      # seconds to wait on master
 
@@ -23,8 +23,9 @@ attempts=0
 max_attempts=60  # 2 min timeout, then proceed anyway
 
 while [ $count -lt $CONSECUTIVE ] && [ $attempts -lt $max_attempts ]; do
-    offset=$(pmc -u -b 0 'GET CURRENT_DATA_SET' 2>/dev/null \
-        | awk '/offsetFromMaster/{gsub(/-/,"",$2); print $2}')
+    offset=$(/usr/sbin/pmc -u -b 0 -i "/tmp/pmc.$$" -s /var/run/ptp4lro \
+        'GET CURRENT_DATA_SET' 2>/dev/null \
+        | awk '/offsetFromMaster/{gsub(/-/,"",$2); printf "%d\n", $2}')
 
     if [ -n "$offset" ] && [ "$offset" -lt "$THRESHOLD" ] 2>/dev/null; then
         count=$((count + 1))
