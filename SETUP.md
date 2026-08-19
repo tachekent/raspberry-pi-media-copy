@@ -135,15 +135,35 @@ The server snoops its own broadcast port (`_udp_listener_loop`) to update `Playb
 
 `play.py` sets `start_at = time.time() + delay` (default 2s) and broadcasts the timestamp. Each client waits until `start_at` using a sleep + busy-wait combination for sub-millisecond precision. With PTP-synced clocks, all clients hit the same timestamp within ~20ns of each other.
 
+### How position synchronisation works
+
+`play.py` picks a future Unix timestamp `T = time.time() + delay` and broadcasts it once. This is the canonical "playback epoch" — the wall-clock moment the video logically started at position 0.
+
+Every client independently computes:
+
+```
+expected_position = (time.time() - T) % DURATION
+```
+
+Because chrony keeps all clocks within ~5ms of each other, every client's `time.time()` is virtually identical. They therefore compute the same `expected_position` without any positional data ever being transmitted.
+
+The server rebroadcasts `T` and `DURATION` every 10 seconds (the sync interval). On each receipt, the client queries mpv's current position via IPC, compares it to `expected_position`, and seeks if drift exceeds the threshold (default 30ms).
+
+**Loop resets are implicit.** The `% DURATION` in the formula wraps `expected_position` back to zero each time elapsed time crosses a multiple of `DURATION`. No explicit "reset at loop point" logic is needed. The only requirement is that `DURATION` matches the actual video duration closely — a 0.1s error accumulates at 0.5ms/loop with a 10s correction interval, which is negligible. A 1s error accumulates at 50ms/loop and becomes perceptible over a long run.
+
+**Seek precision matters for HEVC.** mpv's `seek <pos> absolute` snaps to the nearest keyframe (typically every 2–5 seconds for HEVC), which can place mpv up to 600ms away from the requested position. We use `set_property time-pos` instead, which performs a frame-accurate seek. This is why drift corrections converge in 1–2 cycles (~10–20s) rather than oscillating indefinitely.
+
 ### Drift correction
 
-`server.py --sync-interval 10` broadcasts the current playback state every 10 seconds. Each client calculates `expected_position = now - start_time` and compares to mpv's actual position via IPC. If drift exceeds the threshold (default 30ms), the client seeks to the expected position.
+`server.py --sync-interval 10` broadcasts the current playback state every 10 seconds. Each client calculates `expected_position = (now - start_time) % DURATION` and compares to mpv's actual position via IPC. If drift exceeds the threshold (default 30ms), the client seeks to the expected position using `set_property time-pos` for frame accuracy.
 
-The IPC path: `client.py` connects to mpv's Unix socket (`/tmp/mpv-sync-<pid>.sock`) and sends JSON commands. `get_property time-pos` returns current position; `seek <pos> absolute` corrects it.
+The IPC path: `client.py` connects to mpv's Unix socket (`/tmp/mpv-sync-<pid>.sock`) and sends JSON commands. `get_property time-pos` returns the current position; `set_property time-pos <pos>` corrects it.
 
 ### Reconnect / late join
 
-When `client.py` connects to the server's TCP port, the server returns the current `PlaybackState` in the registration response. The client calls `_handle_sync()`, calculates the expected position (`now - start_time`), and starts mpv at that position via `--start=<pos>`. This lets a Pi that reboots mid-playback rejoin immediately.
+When `client.py` connects to the server's TCP port, the server returns the current `PlaybackState` in the registration response. The client calls `_handle_sync()`, calculates the expected position (`(now - start_time) % DURATION`), and starts mpv at that position via `--start=<pos>`. This lets a Pi that reboots mid-playback rejoin immediately.
+
+The slave Pi always boots slightly later than the master (~15–30s) because it waits for chrony to achieve sub-2ms offset before starting. This means it initially starts at a different loop position than the master. Drift corrections converge them within ~30s of the slave beginning playback.
 
 ---
 
