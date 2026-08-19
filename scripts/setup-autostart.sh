@@ -44,8 +44,14 @@ chmod +x "$INSTALL_DIR/scripts/"*.sh
 #    master: serves local clock to the LAN (stratum 8 = "I have no upstream but trust me")
 #    slave:  syncs from master only. Pool servers time out (no internet on direct eth)
 #            so chrony falls back to pi1.local automatically.
-#    conf.d snippet is loaded by the default /etc/chrony/chrony.conf on Debian/Pi OS.
+#
+#    Debian chrony.conf does not include conf.d by default — add confdir once.
+#    (confdir is supported since chrony 4.2; Pi OS Trixie ships 4.6.x)
 sudo mkdir -p /etc/chrony/conf.d
+if ! grep -q 'confdir /etc/chrony/conf.d' /etc/chrony/chrony.conf 2>/dev/null; then
+    echo 'confdir /etc/chrony/conf.d' | sudo tee -a /etc/chrony/chrony.conf > /dev/null
+fi
+
 if [ "$ROLE" = "master" ]; then
     sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
 local stratum 8
@@ -60,12 +66,13 @@ EOF
     # Disable ptp4l if previously installed
     sudo systemctl disable --now ptp-slave.service 2>/dev/null || true
 fi
-sudo systemctl enable chrony
-sudo systemctl restart chrony
 
 # 4. Disable systemd-timesyncd — conflicts with chrony via adjtimex().
+#    Do NOT run `timedatectl set-ntp false`: on systems where chrony is the registered
+#    NTP provider, that command stops chrony too.
 sudo systemctl disable --now systemd-timesyncd 2>/dev/null || true
-sudo timedatectl set-ntp false 2>/dev/null || true
+sudo systemctl enable chrony
+sudo systemctl restart chrony
 
 # 5. Launch client via .bash_profile on tty1 autologin.
 #    drm-copy uses the render node (/dev/dri/renderD128) — it does NOT need DRM master
