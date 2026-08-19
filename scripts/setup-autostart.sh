@@ -94,7 +94,7 @@ if [ "\$(tty)" = "/dev/tty1" ]; then
     mkdir -p $INSTALL_DIR/logs
     set -a; source $INSTALL_DIR/config.env; set +a
     $INSTALL_DIR/scripts/wait-ptp-lock.sh "\$ROLE" >> $INSTALL_DIR/logs/client.log 2>&1
-    exec /usr/bin/python3 $INSTALL_DIR/controller/client.py --server "\$SERVER_IP" \\
+    exec /usr/bin/python3 -u $INSTALL_DIR/controller/client.py --server "\$SERVER_IP" \\
         >> $INSTALL_DIR/logs/client.log 2>&1
 fi
 BASHEOF

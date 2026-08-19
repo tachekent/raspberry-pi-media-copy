@@ -305,8 +305,17 @@ class SyncClient:
             return
 
         # Check position drift (mpv only)
-        if self.player != 'mpv' or not self.mpv_ipc:
+        if self.player != 'mpv':
             return
+
+        # Try to reconnect IPC if it was lost or never connected
+        if not self.mpv_ipc:
+            ipc = MpvIPC(self.ipc_socket_path)
+            if ipc.connect():
+                self.mpv_ipc = ipc
+                print("Reconnected to mpv IPC")
+            else:
+                return
 
         # Calculate expected position
         now = time.time()
@@ -477,8 +486,9 @@ class SyncClient:
         """Connect to mpv IPC socket (called in background thread)"""
         self.mpv_ipc = MpvIPC(self.ipc_socket_path)
 
-        # Retry connection for up to 2 seconds
-        for _ in range(20):
+        # Retry for up to 15s — mpv with --start=<large_pos> can take 3-5s to seek
+        # and create the IPC socket. 2s was too short for late-join seeks.
+        for _ in range(150):
             if self.mpv_ipc.connect():
                 print("Connected to mpv IPC")
 
@@ -491,7 +501,7 @@ class SyncClient:
                 return
             time.sleep(0.1)
 
-        print("Warning: Could not connect to mpv IPC")
+        print("Warning: Could not connect to mpv IPC after 15s")
         self.mpv_ipc = None
 
     def stop_playback(self):
