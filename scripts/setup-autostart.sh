@@ -41,9 +41,8 @@ fi
 chmod +x "$INSTALL_DIR/scripts/"*.sh
 
 # 3. Configure chrony for clock sync.
-#    master: serves local clock to the LAN (stratum 8 = "I have no upstream but trust me")
-#    slave:  syncs from master only. Pool servers time out (no internet on direct eth)
-#            so chrony falls back to pi1.local automatically.
+#    master: syncs from internet NTP, serves to LAN via 'local stratum 8' fallback
+#    slave:  syncs from master only (internet pool is disabled — see below)
 #
 #    Debian chrony.conf does not include conf.d by default — add confdir once.
 #    (confdir is supported since chrony 4.2; Pi OS Trixie ships 4.6.x)
@@ -63,6 +62,12 @@ else
     sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
 server pi1.local iburst prefer minpoll 2 maxpoll 4
 EOF
+    # Disable the default internet pool so chrony syncs from master only.
+    # chrony's 'prefer' keyword doesn't override a stratum gap — internet pool
+    # (stratum 1-2) beats master's local clock (stratum 8) and the slave would
+    # sync from the router instead of pi1, defeating the purpose of peer sync.
+    sudo sed -i 's/^pool /#pool /g' /etc/chrony/chrony.conf
+    sudo sed -i 's/^server /#server /g' /etc/chrony/chrony.conf
     # Disable ptp4l if previously installed
     sudo systemctl disable --now ptp-slave.service 2>/dev/null || true
 fi
