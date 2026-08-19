@@ -15,9 +15,9 @@ echo "=== Pi Video Sync: Installing Dependencies ==="
 echo "Updating package list..."
 sudo apt update
 
-# PTP tools
-echo "Installing PTP tools..."
-sudo apt install -y linuxptp ethtool
+# Clock sync + network tools
+echo "Installing chrony and network tools..."
+sudo apt install -y chrony ethtool
 
 # Python
 sudo apt install -y python3-full
@@ -92,8 +92,7 @@ fi
 # Verify
 echo ""
 echo "=== Verifying ==="
-echo -n "ptp4l:   "; ptp4l -v 2>&1 | head -1 || echo "NOT FOUND"
-echo -n "phc2sys: "; which phc2sys || echo "NOT FOUND"
+echo -n "chrony:  "; chronyd --version 2>&1 | head -1 || echo "NOT FOUND"
 echo -n "ffmpeg:  "; ffmpeg -version 2>&1 | head -1 || echo "NOT FOUND"
 echo -n "mpv:     "; "$MPV_BIN" --version 2>&1 | head -1 || echo "NOT FOUND"
 
@@ -104,14 +103,6 @@ if [ -e /dev/video19 ] && [ -e /dev/media2 ]; then
 else
     echo "Decoder devices not found — may appear after first playback (loads on demand)"
     echo "If missing after reboot: sudo modprobe rpi-hevc-dec"
-fi
-
-echo ""
-echo "=== Checking PTP hardware support ==="
-if ethtool -T eth0 2>/dev/null | grep -q "hardware-transmit"; then
-    echo "PTP hardware timestamping: SUPPORTED"
-else
-    echo "PTP hardware timestamping: NOT DETECTED — use ethernet, not WiFi"
 fi
 
 echo ""

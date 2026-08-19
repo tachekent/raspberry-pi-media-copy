@@ -21,27 +21,49 @@ if [ ! -f "$INSTALL_DIR/config.env" ]; then
     cp "$INSTALL_DIR/config.env.example" "$INSTALL_DIR/config.env"
     echo "Created config.env — edit VIDEO, DURATION, and SERVER_IP before rebooting."
 fi
-# Write/update ROLE so autostart-client.sh knows which PTP wait mode to use
+# Write/update ROLE so autostart-client.sh knows which clock sync wait mode to use
 if grep -q '^ROLE=' "$INSTALL_DIR/config.env" 2>/dev/null; then
     sed -i "s/^ROLE=.*/ROLE=$ROLE/" "$INSTALL_DIR/config.env"
 else
     echo "ROLE=$ROLE" >> "$INSTALL_DIR/config.env"
 fi
 
+# Master runs server.py locally — set SERVER_IP so client.py can connect to it
+if [ "$ROLE" = "master" ]; then
+    if grep -q '^SERVER_IP=' "$INSTALL_DIR/config.env" 2>/dev/null; then
+        sed -i "s|^SERVER_IP=.*|SERVER_IP=localhost|" "$INSTALL_DIR/config.env"
+    else
+        echo "SERVER_IP=localhost" >> "$INSTALL_DIR/config.env"
+    fi
+fi
+
 # 2. Make scripts executable
 chmod +x "$INSTALL_DIR/scripts/"*.sh
 
-# 3. Install PTP service
+# 3. Configure chrony for clock sync.
+#    master: serves local clock to the LAN (stratum 8 = "I have no upstream but trust me")
+#    slave:  syncs from master only. Pool servers time out (no internet on direct eth)
+#            so chrony falls back to pi1.local automatically.
+#    conf.d snippet is loaded by the default /etc/chrony/chrony.conf on Debian/Pi OS.
+sudo mkdir -p /etc/chrony/conf.d
 if [ "$ROLE" = "master" ]; then
-    sudo cp "$INSTALL_DIR/systemd/ptp-master.service" "$SYSTEMD_DIR/"
-    sudo systemctl enable ptp-master.service
+    sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
+local stratum 8
+allow 192.168.0.0/8
+EOF
+    # Disable ptp4l if previously installed
+    sudo systemctl disable --now ptp-master.service 2>/dev/null || true
 else
-    sudo cp "$INSTALL_DIR/systemd/ptp-slave.service" "$SYSTEMD_DIR/"
-    sudo systemctl enable ptp-slave.service
+    sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
+server pi1.local iburst prefer minpoll 2 maxpoll 4
+EOF
+    # Disable ptp4l if previously installed
+    sudo systemctl disable --now ptp-slave.service 2>/dev/null || true
 fi
+sudo systemctl enable chrony
+sudo systemctl restart chrony
 
-# 4. Disable systemd-timesyncd — it fights ptp4l for clock control via adjtimex()
-#    and causes the PTP servo to diverge. ptp4l is the sole clock discipliner.
+# 4. Disable systemd-timesyncd — conflicts with chrony via adjtimex().
 sudo systemctl disable --now systemd-timesyncd 2>/dev/null || true
 sudo timedatectl set-ntp false 2>/dev/null || true
 
