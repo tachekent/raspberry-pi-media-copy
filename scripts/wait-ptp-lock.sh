@@ -25,7 +25,8 @@ max_attempts=60  # 2 min timeout, then proceed anyway
 while [ $count -lt $CONSECUTIVE ] && [ $attempts -lt $max_attempts ]; do
     offset=$(/usr/sbin/pmc -u -b 0 -i "/tmp/pmc.$$" -s /var/run/ptp4lro \
         'GET CURRENT_DATA_SET' 2>/dev/null \
-        | awk '/offsetFromMaster/{gsub(/-/,"",$2); printf "%d\n", $2}')
+        | awk '/stepsRemoved/{steps=int($2)} /offsetFromMaster/{gsub(/-/,"",$2); off=int($2)} \
+               END{if(steps>0) printf "%d\n", off}')
 
     if [ -n "$offset" ] && [ "$offset" -lt "$THRESHOLD" ] 2>/dev/null; then
         count=$((count + 1))

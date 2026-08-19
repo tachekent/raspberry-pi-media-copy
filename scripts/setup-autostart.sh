@@ -40,15 +40,23 @@ else
     sudo systemctl enable ptp-slave.service
 fi
 
-# 4. Launch client via .bash_profile on tty1 autologin.
+# 4. Disable systemd-timesyncd — it fights ptp4l for clock control via adjtimex()
+#    and causes the PTP servo to diverge. ptp4l is the sole clock discipliner.
+sudo systemctl disable --now systemd-timesyncd 2>/dev/null || true
+sudo timedatectl set-ntp false 2>/dev/null || true
+
+# 5. Launch client via .bash_profile on tty1 autologin.
 #    drm-copy uses the render node (/dev/dri/renderD128) — it does NOT need DRM master
 #    or a logind seat. A bare systemd service works too. We use .bash_profile because:
 #    - getty auto-restarts on crash (self-healing without a service)
 #    - gets a logind seat anyway, which is useful if hwdec method ever changes
-if systemctl is-enabled sync-client.service &>/dev/null 2>&1; then
-    sudo systemctl disable --now sync-client.service 2>/dev/null || true
-    echo "Disabled sync-client.service (replaced by .bash_profile autostart)"
-fi
+#
+#    Mask sync-client.service (not just disable) so the system preset can't re-enable
+#    it on boot. The .bash_profile autostart is the correct launch path.
+sudo systemctl stop sync-client.service 2>/dev/null || true
+sudo rm -f "$SYSTEMD_DIR/sync-client.service"
+sudo systemctl mask sync-client.service 2>/dev/null || true
+echo "Masked sync-client.service (replaced by .bash_profile autostart)"
 
 # Write the autostart helper (always overwritten so re-running setup picks up changes)
 cat > "$INSTALL_DIR/autostart-client.sh" <<BASHEOF
@@ -77,7 +85,7 @@ else
     echo "Client autostart already in $BASH_PROFILE (skipping)"
 fi
 
-# 5. Master-only: sync server + autoplay trigger
+# 6. Master-only: sync server + autoplay trigger
 if [ "$ROLE" = "master" ]; then
     sudo cp "$INSTALL_DIR/systemd/sync-server.service" "$SYSTEMD_DIR/"
     sudo cp "$INSTALL_DIR/systemd/sync-autoplay.service" "$SYSTEMD_DIR/"
@@ -85,11 +93,11 @@ if [ "$ROLE" = "master" ]; then
     sudo systemctl enable sync-autoplay.service
 fi
 
-# 6. Boot to console (no desktop)
+# 7. Boot to console (no desktop)
 echo "Configuring headless boot..."
 sudo systemctl set-default multi-user.target
 
-# 7. Autologin for pipe user on tty1 (needed for DRM display access)
+# 8. Autologin for pipe user on tty1 (needed for DRM display access)
 sudo mkdir -p "$SYSTEMD_DIR/getty@tty1.service.d"
 sudo tee "$SYSTEMD_DIR/getty@tty1.service.d/autologin.conf" > /dev/null <<EOF
 [Service]
