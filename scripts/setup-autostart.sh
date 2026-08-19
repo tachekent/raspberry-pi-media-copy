@@ -68,6 +68,11 @@ EOF
     # sync from the router instead of pi1, defeating the purpose of peer sync.
     sudo sed -i 's/^pool /#pool /g' /etc/chrony/chrony.conf
     sudo sed -i 's/^server /#server /g' /etc/chrony/chrony.conf
+    # Also disable DHCP-injected NTP sources — dhcpcd writes the router's NTP
+    # address to /run/chrony-dhcp/ and chrony loads it via sourcedir, bypassing
+    # the pool disable above.
+    sudo sed -i 's|^sourcedir /run/chrony-dhcp|#sourcedir /run/chrony-dhcp|' /etc/chrony/chrony.conf
+    sudo rm -f /run/chrony-dhcp/*.sources 2>/dev/null || true
     # Disable ptp4l if previously installed
     sudo systemctl disable --now ptp-slave.service 2>/dev/null || true
 fi
