@@ -282,7 +282,7 @@ class SyncClient:
         start_time = message.get('start_time')
         server_time = message.get('server_time', time.time())
         loop = message.get('loop', False)
-        duration = message.get('duration')
+        duration = message.get('duration') or self.duration  # fall back to locally stored value
 
         # If we're not playing anything, start playback
         if not self.player_process or self.player_process.poll() is not None:
