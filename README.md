@@ -279,6 +279,8 @@ Verify it took effect:
 grep -a 'FPS for display\|Window size' ~/pi-video-sync/logs/mpv.log | tail -4
 ```
 
+This isn't just theoretical — on the current dev monitors, leaving this unset (60Hz negotiated vs. 25fps content) measurably raised mpv's CPU usage (250–340%) and caused large, non-converging drift corrections between the two Pis. Both dev Pis are currently set to `DRM_MODE=1920x1080@50.00` (verified working; see SETUP.md for the full comparison). **Always check available modes on the actual display first** — don't assume the highest resolution is available at a 25fps-friendly refresh rate.
+
 **TODO before gallery install:** Set `DRM_MODE=3840x2160@25` (or `@30`) in `config.env` on both Pis once the production projectors are connected. Check available modes first to confirm the projector supports it.
 
 ---
@@ -441,11 +443,20 @@ Options:
 
 ## Troubleshooting
 
-### Check PTP sync status
+### Check chrony sync status
 ```bash
-# On slave, look for "s2" (locked) state and low offset
-journalctl -u ptp-slave -f
+# Clock sync uses chrony, not PTP (see SETUP.md). On the slave, look for
+# a low, stable offset against the master (pi1.local):
+chronyc tracking
+chronyc sources -v
 ```
+
+### Inter-Pi drift that grows over a session (not a fixed offset)
+If drift starts small and gets worse the longer playback runs, check for a recent cold boot:
+```bash
+journalctl -b 0 | grep -i "clock wrong"
+```
+A large value here (thousands of seconds) means the RTC had no valid time at boot and chrony had to step-correct it, which leaves chrony's frequency estimate unstable for several minutes afterward — see "Cold Boot Clock Instability & RTC Battery" in SETUP.md. This resolves on its own after chrony settles, and should stop happening once an RTC battery is installed.
 
 ### Check hardware decode is working
 ```bash

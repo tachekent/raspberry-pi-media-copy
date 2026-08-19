@@ -167,6 +167,54 @@ The slave Pi always boots slightly later than the master (~15–30s) because it 
 
 ---
 
+## Cold Boot Clock Instability & RTC Battery
+
+### The problem
+
+Pi 5 has an onboard RTC chip, but **no battery backup by default**. On a cold boot (no battery installed), the RTC has no valid stored time. Observed kernel log:
+
+```
+kernel: rpi-rtc soc@...: setting system clock to 1970-01-01T00:00:17 UTC (17)
+```
+
+The system falls back to some other reference (e.g. the root filesystem's last-modified timestamp) as a sanity floor, then chrony detects the real error once it reaches the internet and performs a **step** correction:
+
+```
+chronyd: System clock wrong by 19461.487274 seconds
+chronyd: System clock was stepped by 19461.487274 seconds
+```
+
+This step itself resolves in seconds — the actual problem is what happens *after* it. Following a large step, chrony's **frequency estimate** (how fast/slow the local oscillator runs relative to real time) is unreliable for some minutes while it re-converges from fresh measurements. During that window, `time.time()` on that Pi runs at a measurably *wrong rate*, not just a wrong offset. Since master and slave each experience their own unrelated frequency-instability period after their own cold boot, the position-sync math (`expected_position = (time.time() - T) % DURATION`, see above) drifts at different, changing rates on each Pi. The result: **inter-Pi drift that grows over the first many minutes of a session**, rather than a fixed offset — worse the longer playback has been running, until chrony settles down.
+
+This is expected to recur **every morning** under a gallery-style deployment where the Pis are hard power-cut nightly and cold-booted each morning with no graceful shutdown — it isn't an occasional fluke, it's the normal cold-boot behavior of an RTC with no battery.
+
+### The fix: RTC battery
+
+Installing a battery (official Raspberry Pi RTC Battery — Panasonic ML2020 rechargeable cell, pre-fitted JST plug) on the Pi 5's RTC header means the RTC holds a real time across power-off instead of resetting to an invalid value. Available in Norway from [Kjell & Company](https://www.kjell.com/no/produkter/data/raspberry-pi/raspberry-pi-rtc-batteri-for-raspberry-pi-5-p88407) — sticks on with the included double-sided tape, plugs straight into the 2-pin JST header, no soldering. Needs one per Pi.
+
+**No software/config changes are needed** — verified on both Pis:
+- `rtcsync` is already present in `/etc/chrony/chrony.conf` (Debian/Pi OS default). This tells chrony to periodically write the system clock into the RTC (via the kernel, every ~11 min) *while running*, not just at a clean shutdown — important since these Pis never get a clean shutdown.
+- No `fake-hwclock` package installed (it would conflict with a real battery-backed RTC — good that it's absent).
+- No legacy `/lib/udev/hwclock-set` override interfering with systemd's own RTC handling.
+
+### After installing the battery
+
+The RTC chip's stored time only becomes trustworthy once `rtcsync` has written a good value to it at least once while the battery is present and the system is running and synced. So:
+- **First boot after installing the battery**: expect to see the same big step correction one more time (the RTC hasn't been seeded yet).
+- **Every boot after that**: the RTC should hold a roughly-correct time across the overnight power-off (only off by however long the Pi was actually powered down, not since epoch/filesystem-mtime), so chrony should only need a small slew, not a disruptive step — avoiding the frequency-instability window entirely.
+
+**Verify it worked** — after the second post-install boot:
+```bash
+journalctl -b 0 | grep -i "clock wrong"
+# Should be absent, or show an error of a few seconds at most (not tens of thousands)
+```
+
+### Known limitation (not yet implemented)
+
+`wait-ptp-lock.sh`'s master mode is a blind `sleep 30` — it doesn't verify chrony has actually stabilized before `sync-autoplay.service` broadcasts the play command. The RTC battery fix should make this moot in practice (no more big steps to wait out), but as defense-in-depth it would be more robust for the master to poll `chronyc tracking` until the frequency estimate stops changing between reads (or hit a timeout), rather than trusting a fixed 30s.
+
+---
+
 ## Forcing Output Resolution and Refresh Rate
 
 By default, mpv's `--vo=drm` uses whatever mode the monitor negotiates via EDID. Two problems arise from this:
@@ -204,9 +252,11 @@ grep -a 'FPS for display\|Window size' ~/pi-video-sync/logs/mpv.log | tail -4
 |---|---|
 | Production projector, 4K, 25fps video | `3840x2160@25` |
 | Production projector, 4K, 30fps video | `3840x2160@30` |
-| 16:9 dev monitor, 25fps video | `2560x1440@60` (or find a 50Hz mode if available) |
+| 16:9 dev monitor, 25fps video | `1920x1080@50.00` (verified working — see below) |
 | 21:9 ultrawide dev monitor, 25fps video | `3440x1440@49.99` (50Hz equivalent — 2:1 ratio) |
 | Unset | Monitor's preferred/negotiated mode |
+
+**Don't just pick the highest resolution — pick the mode whose refresh rate divides evenly into the content's fps.** Dev monitors on this project support 2560x1440, but only at ~60Hz (no 50Hz or 25Hz mode at that resolution — confirmed via `--drm-mode=help`). 60Hz against 25fps content is a 2.4:1 pulldown ratio: every video frame alternates between 2 and 3 display refreshes. Beyond the visible judder, this measurably increased mpv's CPU usage (250–340% observed) and caused large, erratic per-cycle drift corrections between the two Pis (200ms–1.5s, changing sign and magnitude each cycle) that never converged. Dropping to `1920x1080@50.00` (an exact 2:1 ratio, available on both dev monitors used here) cut mpv's CPU usage roughly in half and brought the drift-correction pattern from erratic to a stable, predictable sawtooth. This is a real trade-off (resolution vs. cadence) worth deciding deliberately per display — always run `mpv --vo=drm --drm-mode=help /dev/null` on the actual hardware first; don't assume the highest resolution mode is best.
 
 ### Why not `video=` in cmdline.txt?
 
