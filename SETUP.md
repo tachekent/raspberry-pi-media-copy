@@ -75,7 +75,7 @@ This means `--hwdec=drm-copy` works from a bare systemd service as well as from 
 | Service | What it does |
 |---|---|
 | `ptp-master.service` | Runs `ptp4l` as PTP grandmaster on eth0 |
-| `sync-server.service` | Runs `controller/server.py --sync-interval 10` |
+| `sync-server.service` | Runs `controller/server.py --sync-interval 3` |
 | `sync-autoplay.service` | Waits for PTP lock, then runs `play.py` with config from `config.env` |
 
 ### Services (slave Pi)
@@ -147,7 +147,7 @@ expected_position = (time.time() - T) % DURATION
 
 Because chrony keeps all clocks within ~5ms of each other, every client's `time.time()` is virtually identical. They therefore compute the same `expected_position` without any positional data ever being transmitted.
 
-The server rebroadcasts `T` and `DURATION` every 10 seconds (the sync interval). On each receipt, the client queries mpv's current position via IPC, compares it to `expected_position`, and seeks if drift exceeds the threshold (default 30ms).
+The server rebroadcasts `T` and `DURATION` every 3 seconds (the sync interval — see "Sync interval: 3s, not 10s" below for why). On each receipt, the client queries mpv's current position via IPC, compares it to `expected_position`, and corrects if drift exceeds the threshold (default 30ms) — see "Hybrid drift correction" below for how.
 
 **Loop resets are implicit.** The `% DURATION` in the formula wraps `expected_position` back to zero each time elapsed time crosses a multiple of `DURATION`. No explicit "reset at loop point" logic is needed. The only requirement is that `DURATION` matches the actual video duration closely — a 0.1s error accumulates at 0.5ms/loop with a 10s correction interval, which is negligible. A 1s error accumulates at 50ms/loop and becomes perceptible over a long run.
 
@@ -155,9 +155,43 @@ The server rebroadcasts `T` and `DURATION` every 10 seconds (the sync interval).
 
 ### Drift correction
 
-`server.py --sync-interval 10` broadcasts the current playback state every 10 seconds. Each client calculates `expected_position = (now - start_time) % DURATION` and compares to mpv's actual position via IPC. If drift exceeds the threshold (default 30ms), the client seeks to the expected position using `set_property time-pos` for frame accuracy.
+`server.py --sync-interval 3` broadcasts the current playback state every 3 seconds. Each client calculates `expected_position = (now - start_time) % DURATION` and compares to mpv's actual position via IPC. If drift exceeds `--drift-threshold` (default 30ms), the client corrects it — either with a smooth speed nudge or a hard seek, depending on the size of the drift (see "Hybrid drift correction" below).
 
-The IPC path: `client.py` connects to mpv's Unix socket (`/tmp/mpv-sync-<pid>.sock`) and sends JSON commands. `get_property time-pos` returns the current position; `set_property time-pos <pos>` corrects it.
+The IPC path: `client.py` connects to mpv's Unix socket (`/tmp/mpv-sync-<pid>.sock`) and sends JSON commands. `get_property time-pos` returns the current position; `set_property time-pos <pos>` performs a hard seek; `set_property speed <rate>` nudges playback rate.
+
+### Hybrid drift correction: speed nudge vs. hard seek
+
+Every `set_property time-pos` seek causes a brief visible freeze/hitch on screen — this turned out to be true regardless of how small the correction was (confirmed by watching pi2 visibly stutter on ~50-300ms corrections, well under the seek's own latency). Since the old design corrected *every* threshold-exceeding drift with a hard seek, a Pi with any persistent rate mismatch would visibly jump every single sync cycle.
+
+The fix splits correction into two tiers based on `--hard-seek-threshold` (default 500ms):
+
+- **`abs(drift) > hard_seek_threshold`** — large gap (startup, reconnect, a real outlier). Closing this smoothly would need an obviously fast-forwarded speed change, so it's not worth avoiding a jump here — just seek, using the same seek-latency compensation described below.
+- **`drift_threshold < abs(drift) <= hard_seek_threshold`** — moderate, steady-state drift. Instead of jumping, `client.py` nudges mpv's `speed` property slightly (capped at ±4% — `self.max_speed_offset`) to close the gap gradually. **Neither video file has an audio track**, so there's no pitch-shift penalty to this — it's the reason this approach is viable at all here.
+- **`abs(drift) <= drift_threshold`** — within tolerance, speed is reset to 1.0 (in case a previous nudge left it adjusted).
+
+### Why the speed nudge alone left a residual (and the fix: a learned bias)
+
+A pure proportional correction (`speed_offset = -drift / speed_catchup_window`) only corrects the *change* in drift each cycle — it doesn't account for a *persistent* underlying rate error (each Pi's playback genuinely runs very slightly faster or slower than wall-clock time, independent of any correction). Left uncompensated, that shows up as the ~0.5%/5ms-per-second creep documented earlier in this file. A proportional-only controller facing a constant disturbance settles at a nonzero steady-state error rather than converging to zero — measured directly: pi1 and pi2 each plateaued at a stable ~75-130ms residual instead of trending toward the threshold.
+
+The fix is the standard one for exactly this problem: an integral term. `self.speed_bias` is a slowly-learned EWMA of the speed offset actually needed, added on top of the proportional term:
+
+```python
+speed_offset = self.speed_bias + (-drift / self.speed_catchup_window)
+...
+self.speed_bias = 0.92 * self.speed_bias + 0.08 * speed_offset
+```
+
+Once `speed_bias` converges to (the negative of) a Pi's true underlying rate error, applying `speed = 1.0 + speed_bias` at zero drift exactly cancels that error, holding drift at zero indefinitely instead of just slowing its growth. This is the same self-calibrating philosophy as `seek_latency_estimate` — no hardcoded constant, adapts to whatever the actual hardware/content combination needs.
+
+**The underlying rate error isn't actually constant, though.** Watching the correction log closely showed drift settling into a plateau for ~10-15 cycles, then *stepping* to a different plateau — not a smooth decay. That points at a content-dependent effect, plausibly the variable/auto bitrate encoding (different scenes → different average decode cost → different effective playback rate). A single learned bias can only track the *current* segment's disturbance and has to re-adapt every time it shifts.
+
+The gain (0.08, up from an initial 0.02) was tuned specifically to re-adapt faster across these content-driven shifts: at 0.02 gain, drift got stuck at an elevated plateau (~75-130ms, 2-3 frames at 25fps) for over a minute after each shift; at 0.08, it reaches a small residual (~30-50ms, close to a single frame) within about 30-45 seconds, with no added noise or oscillation in the learned bias.
+
+### Sync interval: 3s, not 10s
+
+Originally 10s. Reducing it to 3s compounds with the bias gain rather than substituting for it: `speed_bias` updates once per sync cycle, so more frequent cycles mean faster *real-time* adaptation for the same per-update gain, and each proportional correction is smaller since drift is caught before it accumulates as much. It does **not** help detect content-driven rate shifts sooner — those happen on a ~60-130s timescale, well above either interval — the benefit is purely in how fast the response converges once a shift is happening.
+
+Measured result: at 3s, both Pis now converge from a fresh hard-seek to a stable, small residual (~35ms) within 30-45 seconds, and — notably — **both converge to nearly the same residual value**, which is what actually matters for the two screens' relative sync. The cost is negligible: sync broadcasts are tiny JSON packets, and the IPC round-trips involved measure in single-digit milliseconds.
 
 ### mpv IPC desync bug (fixed 2026-08-19/20)
 
@@ -175,9 +209,11 @@ A separate, smaller effect: `set_property time-pos` returning success only means
 
 `MpvIPC.seek()` now polls mpv's `seeking` property until the seek actually lands and returns how long that took. `SyncClient` keeps a running EWMA (`self.seek_latency_estimate`, 70/30 weighting) of that latency and adds it to the *next* correction's target position — so it self-calibrates from measured behavior instead of a hardcoded constant, and adapts if content, GOP position, or system load changes.
 
-### Known follow-up (not yet addressed)
+### Resolved: pi2 visibly jumping every ~10s (2026-08-20)
 
-pi2 visibly jumps every ~10s to maintain sync — its underlying playback throughput has more inherent per-cycle variance than pi1's, so it needs a real correction almost every cycle (pi1, by contrast, often converges and needs none for many cycles in a row). The correction itself now works reliably and lands close to target, but the seek is still a visible jump on pi2, not a smooth catch-up. Worth investigating why pi2's variance is structurally higher than pi1's (both play different, differently-encoded footage — see "Cold Boot Clock Instability" above for the other known per-Pi asymmetry) before deciding whether this needs a fix or is acceptable as-is.
+Originally logged here as an open follow-up: pi2 visibly jumped every ~10s to maintain sync, because its underlying playback throughput has more inherent per-cycle variance than pi1's, so it needed a real correction almost every cycle while pi1 often went many cycles without one. The hard-seek-only design meant every one of those corrections was a visible freeze regardless of size.
+
+Fixed by the hybrid speed-nudge/hard-seek split, the learned bias term, and the 3s sync interval documented above. Net effect measured live: no more freezes for routine corrections (speed nudges instead), and both Pis now converge to nearly the same small residual (~35ms) rather than pi2 persistently lagging behind a much larger, jumpier correction pattern. The root question of *why* pi2's variance is structurally higher than pi1's (different, differently-encoded footage on each) was never answered — the fix neutralizes the symptom rather than the cause, which is fine for now but worth remembering if the residual ever grows again.
 
 ### Reconnect / late join
 

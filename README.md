@@ -158,7 +158,7 @@ On each **slave** Pi:
 
 On the **master** Pi:
 ```bash
-python3 controller/server.py --sync-interval 10
+python3 controller/server.py --sync-interval 3
 ```
 
 On each **slave** Pi:
@@ -228,7 +228,7 @@ For long videos (1+ hours), enable periodic sync to prevent drift:
 
 **Server side:**
 ```bash
-python3 controller/server.py --sync-interval 10  # Check every 10 seconds
+python3 controller/server.py --sync-interval 3  # Check every 3 seconds
 ```
 
 **Client side:**
@@ -238,9 +238,12 @@ python3 controller/client.py --drift-threshold 0.03
 
 # Tighter threshold for 60fps content
 python3 controller/client.py --drift-threshold 0.016
+
+# Above this much drift, jump instead of nudging speed (default: 0.5 = 500ms)
+python3 controller/client.py --hard-seek-threshold 0.5
 ```
 
-When drift exceeds the threshold, the client seeks to the correct position. With PTP providing nanosecond-accurate clocks, corrections should be rare and minimal.
+Correction is hybrid, not a single fixed action: below `--hard-seek-threshold`, the client closes drift with a small, smooth nudge to mpv's playback speed (no audio track in these files, so no pitch penalty) instead of jumping — every hard seek causes a brief visible freeze, so this avoids one on routine corrections. Above that threshold (startup, reconnect, a real outlier), it falls back to a hard seek. See SETUP.md's "Hybrid drift correction" section for the full rationale, including a self-learning bias term that cancels each Pi's persistent rate error instead of just reacting to it.
 
 ## Late Join / Restart Recovery
 
@@ -403,7 +406,8 @@ python3 controller/server.py [options]
 Options:
   --port PORT              TCP port for clients (default: 5000)
   --broadcast-port PORT    UDP broadcast port (default: 5001)
-  --sync-interval SECS     Position sync interval, 0=disabled (default: 0)
+  --sync-interval SECS     Position sync interval, 0=disabled (default: 0;
+                           production uses 3 — see sync-server.service)
 
 Interactive commands:
   play <path> [delay] [loop] [duration]  - Start playback
@@ -425,7 +429,9 @@ Options:
   --broadcast-port PORT    UDP broadcast port (default: 5001)
   --id NAME                Client ID (default: hostname)
   --player {mpv,ffplay}    Video player (default: mpv)
-  --drift-threshold SECS   Max drift before correction (default: 0.03)
+  --drift-threshold SECS   Max drift before correcting (default: 0.03)
+  --hard-seek-threshold SECS   Drift above which to jump instead of
+                                nudging speed (default: 0.5)
 ```
 
 ### Play Command

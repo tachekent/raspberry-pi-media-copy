@@ -5,8 +5,9 @@ Sync Client - Receives playback commands from the sync server
 Runs on each Pi (including master if it also plays video).
 Listens for UDP broadcast commands and executes them at the specified time.
 
-With drift correction enabled, responds to periodic sync broadcasts
-and seeks to correct any drift beyond the threshold.
+With drift correction enabled, responds to periodic sync broadcasts and
+corrects drift beyond the threshold — a smooth speed nudge for moderate
+drift, or a hard seek for large gaps (startup, reconnect, an outlier).
 """
 
 import argparse
@@ -134,6 +135,15 @@ class MpvIPC:
             time.sleep(0.01)
         return time.time() - t_start
 
+    def set_speed(self, speed: float):
+        """Set playback speed — used for smooth drift correction.
+
+        Neither video file has an audio track, so there's no pitch-shift
+        penalty to nudging speed slightly to close a gap gradually instead
+        of jumping to it with an hr-seek.
+        """
+        self._send_command(['set_property', 'speed', speed])
+
     def get_duration(self) -> Optional[float]:
         """Get video duration in seconds"""
         result = self._send_command(['get_property', 'duration'])
@@ -151,6 +161,7 @@ class SyncClient:
         client_id: str = None,
         player: str = 'mpv',
         drift_threshold: float = 0.03,  # 30ms default
+        hard_seek_threshold: float = 0.5,  # 500ms — above this, jump instead of nudging speed
     ):
         self.server_host = server_host
         self.server_port = server_port
@@ -158,6 +169,15 @@ class SyncClient:
         self.client_id = client_id or socket.gethostname()
         self.player = player
         self.drift_threshold = drift_threshold
+        self.hard_seek_threshold = hard_seek_threshold
+        # Speed-nudge tuning: cap how far speed deviates from 1.0 (imperceptible
+        # on video with no audio track) and aim to close a gap over roughly this
+        # many seconds — longer than the sync interval so corrections converge
+        # smoothly across a couple of cycles instead of overshooting.
+        self.max_speed_offset = 0.04
+        self.speed_catchup_window = 15.0
+        # Slowly-learned baseline speed offset (EWMA) — see _handle_sync.
+        self.speed_bias = 0.0
         self.running = False
         self.player_process: subprocess.Popen = None
 
@@ -195,7 +215,8 @@ class SyncClient:
         # Bind UDP socket to receive broadcasts
         self.udp_socket.bind(('', self.broadcast_port))
         print(f"Listening for broadcasts on port {self.broadcast_port}")
-        print(f"Drift threshold: {self.drift_threshold * 1000:.1f}ms")
+        print(f"Drift threshold: {self.drift_threshold * 1000:.1f}ms "
+              f"(hard seek above {self.hard_seek_threshold * 1000:.0f}ms)")
 
         # Connect to server
         if self.server_host:
@@ -368,8 +389,12 @@ class SyncClient:
 
         drift = actual_pos - expected_pos
 
-        # Check if drift exceeds threshold
-        if abs(drift) > self.drift_threshold:
+        if abs(drift) > self.hard_seek_threshold:
+            # Large gap (startup, reconnect, or a real outlier) — closing this
+            # smoothly via speed would need an obviously fast-forwarded speed
+            # change, so just jump. Reset speed first in case a previous nudge
+            # was still active, so playback resumes at normal rate.
+            self.mpv_ipc.set_speed(1.0)
             # Compensate for the seek's own latency: by the time an hr-seek lands,
             # real time has advanced by however long decode-forward-to-target took.
             # Predict that using the running estimate so the seek lands on target
@@ -377,15 +402,46 @@ class SyncClient:
             target = expected_pos + self.seek_latency_estimate
             if loop and duration and duration > 0:
                 target = target % duration
-            print(f"Sync: Drift {drift*1000:.1f}ms exceeds threshold, seeking to {target:.3f}s "
+            print(f"Sync: Drift {drift*1000:.1f}ms exceeds hard-seek threshold, seeking to {target:.3f}s "
                   f"(latency est: {self.seek_latency_estimate*1000:.1f}ms)")
             latency = self.mpv_ipc.seek(target)
             # EWMA update — adapts to changing seek cost (GOP position, content,
             # system load) over time rather than trusting a single measurement.
             self.seek_latency_estimate = 0.7 * self.seek_latency_estimate + 0.3 * latency
+
+        elif abs(drift) > self.drift_threshold:
+            # Moderate drift — close it smoothly with a small speed nudge instead
+            # of a visible hr-seek jump (every seek causes a brief freeze/hitch
+            # regardless of how small the correction is). Negative drift means
+            # mpv is behind, so speed up; positive means it's ahead, so slow down.
+            #
+            # The proportional term alone (-drift/catchup_window) only corrects
+            # the *change* in drift, and settles at a steady-state residual
+            # proportional to this Pi's underlying rate error — measured earlier
+            # as a persistent ~0.5%/5ms-per-second creep (see SETUP.md). speed_bias
+            # is a slowly-learned baseline (same EWMA approach as
+            # seek_latency_estimate) that converges to cancel that rate error
+            # directly, so the proportional term only has to correct residual
+            # noise around it instead of fighting a constant disturbance forever.
+            speed_offset = self.speed_bias + (-drift / self.speed_catchup_window)
+            speed_offset = max(-self.max_speed_offset, min(self.max_speed_offset, speed_offset))
+            new_speed = 1.0 + speed_offset
+            print(f"Sync: Drift {drift*1000:.1f}ms, nudging speed to {new_speed:.4f} to catch up smoothly "
+                  f"(learned bias: {self.speed_bias*100:.3f}%)")
+            self.mpv_ipc.set_speed(new_speed)
+            # Gain of 0.08 (was 0.02): the underlying rate error isn't actually
+            # constant — it steps between content-dependent plateaus (observed
+            # ~75-116ms residual for ~12 cycles, then a step to ~41ms), likely
+            # tracking scene complexity under variable bitrate. A slower gain
+            # left drift stuck in the bad plateau for over a minute after each
+            # shift; this re-adapts faster at the cost of being noisier moment
+            # to moment. See SETUP.md.
+            self.speed_bias = 0.92 * self.speed_bias + 0.08 * speed_offset
+
         else:
-            # Optional: log small drift for debugging
-            pass  # print(f"Sync: Drift {drift*1000:.1f}ms within threshold")
+            # Within threshold — make sure we're not still running at a speed
+            # adjusted by a previous correction.
+            self.mpv_ipc.set_speed(1.0)
 
     def _start_at_position(self, video: str, start_time: float, loop: bool, duration: float = None):
         """Start playback at the correct position for sync"""
@@ -593,7 +649,10 @@ def main():
     parser.add_argument('--player', choices=['mpv', 'ffplay'], default='mpv',
                         help='Video player to use (default: mpv)')
     parser.add_argument('--drift-threshold', type=float, default=0.03,
-                        help='Max drift in seconds before seeking to correct (default: 0.03 = 30ms)')
+                        help='Max drift in seconds before correcting (default: 0.03 = 30ms)')
+    parser.add_argument('--hard-seek-threshold', type=float, default=0.5,
+                        help='Drift in seconds above which to jump instead of nudging '
+                             'speed (default: 0.5 = 500ms)')
     args = parser.parse_args()
 
     client = SyncClient(
@@ -603,6 +662,7 @@ def main():
         client_id=args.id,
         player=args.player,
         drift_threshold=args.drift_threshold,
+        hard_seek_threshold=args.hard_seek_threshold,
     )
 
     try:
