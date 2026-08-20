@@ -199,18 +199,16 @@ The entire "small speed nudges are free" argument above rests on neither video f
 
 Before adding audio to a Pi, revisit `client.py`'s correction logic for that Pi specifically — options include: enabling `--audio-pitch-correction`/`scaletempo2` and verifying it sounds acceptable at the ±4% range currently used, lowering `max_speed_offset` further for that Pi, or falling back to hard-seek-only correction there (accepting the freeze) while keeping the audio-less Pi(s) on the smooth path. Don't assume the current default `max_speed_offset`/`hard_seek_threshold` values are still fine once audio is in the mix without testing.
 
-**Test plan (not yet run — write this up before the audio Pi goes live):**
+**Test plan — first attempt run 2026-08-20, inconclusive, refine before trusting results.**
 
-Use a synthetic, predictable test track rather than real content — a pure tone makes even a tiny unintended pitch shift obvious, where music or speech would mask it. Two independent signals, mixed together:
-- A sine tone with a slow, known sinusoidal *frequency* modulation (e.g. 440Hz ±20Hz over a ~20s period) — any unexpected wobble or step layered on top of the expected smooth sweep is a correction-induced artifact, easy to spot on a spectrogram.
-- A short click every exactly 1.000s, independent of the tone — a pitch-independent ground truth for actual elapsed playback time, to confirm audio timing tracks the corrected video timeline rather than drifting from it.
+Confirmed useful facts: `--audio-pitch-correction` defaults to `yes` in this mpv build, so pitch correction would already be active if audio were added today with zero code changes.
 
-Procedure:
-1. Generate the track (mirror `scripts/make_drift_test.sh`'s pattern — a new `scripts/make_audio_test_track.sh` makes sense).
-2. Drive mpv's `speed` property through an actual *recorded* sequence of values from a real correction log (several are already captured in this project's history) rather than inventing one, so the test reflects real-world transition frequency (~every 3s) and magnitude (~±1-3%, occasionally up to ±4%).
-3. Render output directly to a file via `--ao=pcm` (deterministic, no microphone/capture hardware needed) under two conditions: pitch correction disabled (negative control — confirms the shift is audible/measurable without it) and enabled (confirms it's actually suppressed).
-4. Analyze: pitch-track the rendered output (FFT or autocorrelation per short window) against the expected clean sweep, verify click timestamps land where expected, and listen specifically around each speed-transition instant — repeated small tempo-ratio changes are exactly the kind of thing that can introduce an audible tick or pop in some pitch-correction implementations, and this design changes speed roughly every sync cycle, so that risk is real and specific to check for, not hypothetical.
-5. Verify mpv 0.40.0's actual current pitch-correction option name/default behavior in the manual at test time rather than assuming — this may have changed across versions.
+First attempt used a synthetic sine tone with a slow, known sinusoidal frequency sweep (440Hz ±20Hz over ~20s) plus an independent 1-second click train (pitch-independent ground truth for elapsed time) — a pure tone makes even a tiny unintended pitch shift obvious, where music or speech would mask it. Two methodology problems came up:
+
+1. **`--ao=pcm` renders far faster than real time** (a 90s file rendered in ~0.4s), so driving mpv's `speed` property via live IPC at wall-clock intervals matching a real correction log didn't work — neither wall-clock timing nor polling `time-pos` could reliably land each change at its intended point; multiple changes ended up bunched together.
+2. **Fallback (render each speed segment as an independent mpv process, then concatenate) is harsher than reality**: each segment restarts the pitch-correction filter from scratch, so it necessarily shows a phase discontinuity at *every* segment boundary regardless of whether real, continuous playback would. Measured 12 discontinuities in the pitch-corrected version vs. 1 in the uncorrected one — likely just that reinit artifact, not evidence pitch correction is worse, but this test design can't tell the difference.
+
+**Better approach (not yet tried): mux the test tone into an actual copy of the production video and let the real `sync-server`/`client.py` loop drive real corrections against it.** This exercises the exact live, continuous-process `speed` changes `client.py` actually applies — no filter reinit, real timing and jitter from the real correction loop instead of a replayed log. This is the right next step before drawing any conclusion about audio safety, and should be tried before the audio Pi goes live.
 
 ### mpv IPC desync bug (fixed 2026-08-19/20)
 
