@@ -193,6 +193,12 @@ Originally 10s. Reducing it to 3s compounds with the bias gain rather than subst
 
 Measured result: at 3s, both Pis now converge from a fresh hard-seek to a stable, small residual (~35ms) within 30-45 seconds, and — notably — **both converge to nearly the same residual value**, which is what actually matters for the two screens' relative sync. The cost is negligible: sync broadcasts are tiny JSON packets, and the IPC round-trips involved measure in single-digit milliseconds.
 
+### ⚠️ Known constraint: speed-nudge correction assumes no audio
+
+The entire "small speed nudges are free" argument above rests on neither video file having an audio track — confirmed via `audio-codec-name: None` on both during today's testing. **One Pi is planned to have audio in future content.** For that Pi, a `speed` change pitch-shifts audio audibly (unless mpv's pitch-preserving `scaletempo`/`scaletempo2` audio filter is enabled, which has its own quality/latency tradeoffs), so the moderate-drift branch in `_handle_sync()` cannot silently keep nudging speed once audio is added there.
+
+Before adding audio to a Pi, revisit `client.py`'s correction logic for that Pi specifically — options include: enabling `--audio-pitch-correction`/`scaletempo2` and verifying it sounds acceptable at the ±4% range currently used, lowering `max_speed_offset` further for that Pi, or falling back to hard-seek-only correction there (accepting the freeze) while keeping the audio-less Pi(s) on the smooth path. Don't assume the current default `max_speed_offset`/`hard_seek_threshold` values are still fine once audio is in the mix without testing.
+
 ### mpv IPC desync bug (fixed 2026-08-19/20)
 
 For a long stretch this project's drift correction appeared to work sometimes and silently stop other times, with no errors — deeply confusing to debug because the symptom (large, unexplained, non-converging drift on one Pi but not the other) looked like a hardware/timing problem. It wasn't.
