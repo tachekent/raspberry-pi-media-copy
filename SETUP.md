@@ -339,6 +339,22 @@ Paired with `DRM_MODE`, `client.py` also passes `--video-sync=display-resample` 
 
 The `video=<connector>:<mode>` kernel parameter is documented as the way to force KMS output on Pi OS, but in practice the monitor's EDID negotiation wins even when the parameter is present in `/proc/cmdline`. `--drm-mode` is applied by mpv directly at the DRM/KMS level and reliably overrides it.
 
+### Follow-up (not yet implemented): check the connector is actually connected before launching mpv
+
+Real incident (2026-08-20): a monitor was connected but showing no image. Cause: the active HDMI connector had changed (was `HDMI-A-2`, became `HDMI-A-1` — the physical cabling/port in use changed), but the *already-running* mpv process never re-detects this — it negotiates a connector once at its own startup and keeps using it, so a runtime hotplug or port change is invisible to it until it's restarted. A plain restart fixed it (mpv re-detects on every startup, confirmed via the "Connector N currently connected to encoder M" log line), but nothing currently guards against booting into this state in the first place.
+
+Two related risks worth hardening in `scripts/setup-autostart.sh` / `autostart-client.sh` before relying on this unattended:
+1. **At boot, mpv might start before EDID handshake completes** on a slow-to-wake display, finding no valid modes for the forced `DRM_MODE` and failing outright.
+2. **A connector change after boot** (different port, monitor swap) is silently invisible until the next restart — there's no automatic recovery today.
+
+Proposed fix: before launching `client.py`, poll `/sys/class/drm/*/status` (bounded timeout, e.g. 10-15s) until at least one HDMI connector reports `connected`, logging which one. This directly addresses risk 1. Risk 2 (detecting a *later* change while already running) would need something extra, like watching for DRM hotplug uevents and triggering a client/mpv restart — a bigger addition, worth deciding whether it's justified given restarts have so far been a rare, manually-triggered fix.
+
+### Follow-up (not yet investigated): both Pis lost IPv4 simultaneously (2026-08-20)
+
+Real incident, same day: both Pis' `eth0` had no IPv4 address at all (only IPv6 remained) — a network-wide DHCP problem, not anything in this project's software. pi1 kept appearing to "work" only because its own client talks to `localhost`, masking the loss; pi2 had no path to reach pi1 at all (mDNS resolution failure was a symptom, not the cause — direct ping to pi1's known IP also failed). Fixed both with `sudo nmcli connection up "Wired connection 1"` to force a fresh DHCP renewal.
+
+Root cause not determined — could be the router/switch rebooting, a lease conflict, or something else upstream of these Pis. Worth keeping an eye on whether this recurs; if it does, it may be worth a periodic connectivity self-check (e.g. a systemd timer that notices "no IPv4 for N minutes" and retries `nmcli connection up` automatically) rather than requiring a manual SSH fix each time — but not worth building until it's shown to be a recurring problem rather than a one-off.
+
 ---
 
 ## Logs
