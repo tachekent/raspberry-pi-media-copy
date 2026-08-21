@@ -391,7 +391,7 @@ Discovered because the two Pis were visibly ~7 frames apart. `journalctl -u sync
 
 **How to apply**: if other background threads in `server.py`/`client.py` are added later, give them the same treatment — an uncaught exception in a daemon thread doesn't crash the process or show up in `systemctl status`, so failures like this are invisible unless someone is actively watching drift or reading `journalctl`.
 
-### Direct 1-1 Pi connection, no switch (resolved 2026-08-21 — switched to static IPs)
+### Direct 1-1 Pi connection, no switch (resolved and confirmed 2026-08-21/22 — switched to static IPs)
 
 **Reframed partway through debugging this**: the direct 1-1 connection isn't a fallback scenario to accommodate — it's the *normal, permanent deployment*. The two Pis are wired directly to each other with a single cable at the venue; a switch is only ever plugged in temporarily during setup/dev (internet access, SSH convenience). That reframing is why the fix below is much simpler than everything tried before it.
 
@@ -407,7 +407,7 @@ Discovered because the two Pis were visibly ~7 frames apart. `journalctl -u sync
 
 Applied live to both Pis and verified: static addresses hold, playback and drift correction both undisturbed by the network reconfiguration itself.
 
-**Not yet re-tested physically** with a fresh reboot while genuinely directly-connected (the specific scenario that triggered this whole redesign) — static IP configuration has no negotiation to race or time out, so there's much less reason to expect a repeat of the hang, but it hasn't been confirmed with an actual cable-swap-then-reboot test yet.
+**Confirmed with a real physical test**: both Pis connected 1-1 with no switch, rebooted cold, correct static IPs shown on the boot screen (no `127.0.0.1`/no-address hang this time), and playback converged to frame-perfect sync after about 2 minutes — matching the normal hard-seek + PTP/chrony convergence timeline, not a degraded or unusual one. The exact scenario that caused the original boot hang now works cleanly.
 
 **Unrelated side quest, still unresolved**: tried to make `journalctl` persist across reboots (`Storage=persistent` in `journald.conf`, plus manually creating `/var/log/journal/<machine-id>/`) so a future test's logs wouldn't get wiped by a recovery reboot. Didn't work — kept reporting `/run/log/journal/...` (volatile) even after two service restarts and an explicit `--flush`. Root cause not found; low priority now that static IPs remove most of the reason to need it, but worth another look if deep NetworkManager debugging is ever needed again.
 
