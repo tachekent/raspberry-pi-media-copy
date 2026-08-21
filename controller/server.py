@@ -123,13 +123,16 @@ class SyncServer:
             try:
                 if self.playback.is_playing():
                     self.broadcast(self.playback.to_dict())
-            except OSError as e:
+            except Exception as e:
                 # A transient network blip (e.g. "Network is unreachable" during a
                 # DHCP hiccup) used to raise out of this loop uncaught, silently
                 # killing the thread for good — the service kept reporting "active"
                 # but never broadcast another sync packet, leaving clients to drift
                 # unchecked until someone noticed and restarted it by hand. Log and
-                # keep looping instead so it self-recovers once the network returns.
+                # keep looping instead so it self-recovers — broad on purpose, since
+                # this is a gallery install with no one present to notice or restart
+                # it by hand, and *any* uncaught exception here is silently fatal to
+                # the thread the same way OSError was.
                 print(f"Sync broadcast failed ({e}), will retry next interval")
 
     def _udp_listener_loop(self):

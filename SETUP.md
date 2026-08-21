@@ -387,9 +387,21 @@ Root cause not determined — could be the router/switch rebooting, a lease conf
 
 Discovered because the two Pis were visibly ~7 frames apart. `journalctl -u sync-server` on pi1 showed `_sync_broadcast_loop` had thrown `OSError: [Errno 101] Network is unreachable` from `broadcast()`'s `udp_socket.sendto()` at 10:29:12 that morning — almost certainly during the "both Pis lost IPv4" incident above. Because `_sync_broadcast_loop` ran as a plain `threading.Thread` with no try/except around the broadcast call, that one exception killed the thread permanently. `systemctl status` kept reporting the service as `active (running)` the whole time — the main process and its other threads (client registration, keepalive) were fine — but no sync packet had gone out since, so both Pis had been free-running independently for about 12 hours by the time it was noticed.
 
-**Fix**: `_sync_broadcast_loop` now catches `OSError` around the broadcast call and logs+continues instead of dying, so a future transient network blip self-heals on the next `sync_interval` tick instead of silently disabling corrections until someone happens to notice and restarts the service by hand.
+**Fix**: `_sync_broadcast_loop` now catches (broadly — `Exception`, not just `OSError`, since *any* uncaught exception here is equally fatal to the thread and this is an unattended gallery install with no one to notice or restart it by hand) around the broadcast call and logs+continues instead of dying, so a future transient network blip self-heals on the next `sync_interval` tick instead of silently disabling corrections until someone happens to notice and restarts the service by hand. Deployed to pi1 but not force-restarted into the live service (would wipe in-memory `PlaybackState` and require a fresh `play.py` re-arm) — takes effect at the next natural restart/reboot.
 
 **How to apply**: if other background threads in `server.py`/`client.py` are added later, give them the same treatment — an uncaught exception in a daemon thread doesn't crash the process or show up in `systemctl status`, so failures like this are invisible unless someone is actively watching drift or reading `journalctl`.
+
+### Direct 1-1 Pi connection, no switch (fixed 2026-08-21)
+
+The two Pis normally connect through a switch with DHCP, but should also work connected directly to each other with just one cable — no switch, no DHCP server, no manual reconfiguration to switch between the two setups.
+
+Discovery already worked for this without any code changes: `config.env`'s `SERVER_IP=pi1.local` uses mDNS (avahi), not a hardcoded IP — mDNS resolves fine over any address scope, including a self-assigned link-local one, since it's designed for exactly this "no router, no DHCP" case.
+
+The actual gap was purely at the network layer — getting *any* valid IPv4 address with no DHCP server present. Fixed with NetworkManager 1.52's explicit `ipv4.link-local=fallback` mode on `eth0`'s connection profile: self-assigns a `169.254.x.x` address *only if no other IPv4 address was obtained*, so it doesn't interfere with the normal DHCP-via-switch path at all — same interface, same profile, adjusts automatically to whichever is actually plugged in.
+
+That surfaced a second, easy-to-miss gap: the master's chrony `allow 192.168.0.0/8` ACL (also just fixed to the intended `/16` — a `/8` mask only covers the first octet, `192.0.0.0/8`, far broader than intended) doesn't cover `169.254.0.0/16` at all. Without adding that range too, the network layer would come up fine in the direct-connect case but chrony would silently reject the slave's sync requests — clock sync would just time out after 120s (`wait-ptp-lock.sh`'s `chronyc waitsync` warning: "proceeding anyway") with no obvious error pointing at the real cause.
+
+Both fixes are in `setup-autostart.sh` now for future Pi setups. Not yet validated with an actual physical direct-cable test (only checked config correctness) — worth doing that physically before relying on it for a real deployment.
 
 ---
 
