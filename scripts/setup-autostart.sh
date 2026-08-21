@@ -84,6 +84,18 @@ sudo systemctl disable --now systemd-timesyncd 2>/dev/null || true
 sudo systemctl enable chrony
 sudo systemctl restart chrony
 
+# 4b. Enable audio. PipeWire is installed but never starts headless — it's
+#     designed to launch inside a desktop login session, which never happens
+#     on this tty1-autologin-to-a-shell setup. `wireplumber` (the session/policy
+#     manager that actually discovers ALSA hardware and creates sink nodes) is
+#     the piece that's normally missing; once it runs, mpv's default AO probe
+#     (pipewire first) just works with zero extra mpv flags. Note this mpv
+#     build has no ALSA output compiled in at all (`libasound2-dev` was never
+#     in install-deps.sh), so `--ao=alsa` is not a fallback option here.
+sudo loginctl enable-linger pipe
+systemctl --user enable pipewire.service pipewire.socket wireplumber.service pipewire-pulse.service pipewire-pulse.socket
+systemctl --user start pipewire wireplumber pipewire-pulse 2>/dev/null || true
+
 # 5. Launch client via .bash_profile on tty1 autologin.
 #    drm-copy uses the render node (/dev/dri/renderD128) — it does NOT need DRM master
 #    or a logind seat. A bare systemd service works too. We use .bash_profile because:

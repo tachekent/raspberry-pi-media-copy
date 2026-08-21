@@ -28,7 +28,7 @@ mpv 0.40.0 requires Lua < 5.3. If you install `liblua5.4-dev`, mpv silently skip
 Hard dependency in mpv 0.40.0. Not optional even if you never use the `gpu-next` video output. The build will fail without it.
 
 **`libpipewire-0.3-dev libpulse-dev`**
-Required at build time for audio driver detection. Without them, mpv may fail to build or emit warnings about missing audio backends. In practice, audio doesn't work on a headless Pi booted to `multi-user.target` (no PipeWire/PulseAudio session), but the headers must be present at compile time.
+Required at build time for audio driver detection. Without them, mpv may fail to build or emit warnings about missing audio backends. **Note this mpv build has no ALSA output at all** (`--ao=alsa` fails with "Audio output alsa not found!") — `libasound2-dev` was never in the build deps, so only `pipewire`/`pulse` AOs got compiled in. See "Getting audio working on headless boot" below for how to actually get sound out despite that.
 
 **`libzimg-dev`**
 Software scaler. Used when the video resolution doesn't match the display output resolution (e.g. playing 4K content on a display set to 1440p). Without it, scaling either uses a lower-quality fallback or fails.
@@ -217,6 +217,26 @@ An initial pass of this run showed one isolated 174Hz spike right after the *las
 Artifacts from this run, for reference/re-verification: `test_video_with_audio.mp4` (muxed test clip), `out_corrected.wav` / `out_uncorrected.wav` (original two-condition comparison), `out_corrected3.wav` (final clean rerun after the test-script fix), `log_corrected*.csv` / `log_uncorrected.csv` (applied speed per transition), `clips/*.wav` (short listen-test excerpts, kept for reference even though the anomaly they were extracted to investigate turned out to be a test artifact) — all currently in the session scratchpad, not yet committed to the repo.
 
 **Conclusion: `--audio-pitch-correction=yes` (mpv's default) is safe to rely on for the current ±4% `max_speed_offset` range — confirmed clean across every real transition, no open questions remaining.** No code change needed in `client.py` for the speed-nudge branch itself.
+
+### Getting audio actually working on headless boot (fixed 2026-08-21)
+
+With real audio content now live in production, the "no PipeWire/PulseAudio session on headless boot" limitation (noted above and in the mpv build-deps section) needed an actual fix, not just a documented workaround.
+
+First instinct — force ALSA directly with `--ao=alsa` and skip PipeWire/Pulse entirely — doesn't work: **this mpv build has no ALSA output compiled in at all.** `--ao=alsa --audio-device=alsa/plughw:vc4hdmi0,0` fails with `Audio output alsa not found!` regardless of device string; checking mpv's own "List of enabled features" confirms `pipewire` and `pulse` are present but `alsa` is not — `libasound2-dev` was never in `install-deps.sh`'s build dependencies, so mpv's meson build never detected it. Rebuilding mpv with ALSA support is one fix, but a faster one exists: PipeWire's `alsa` device backend is already compiled in and just needs a running PipeWire session, which the headless boot never provides.
+
+**Actual fix — no mpv rebuild needed, no `client.py` changes needed:**
+
+```
+sudo loginctl enable-linger pipe   # let pipe's systemd --user instance run without a login session
+systemctl --user enable pipewire.service pipewire.socket wireplumber.service pipewire-pulse.service pipewire-pulse.socket
+systemctl --user start wireplumber pipewire-pulse   # (only needed once; enable+reboot covers it after)
+```
+
+`pipewire.service` itself was already running (socket-activated, apparently from the tty1 autologin shell), but `wireplumber.service` — the session/policy manager that actually discovers ALSA hardware and creates sink nodes — was not, so PipeWire had zero sinks (`PipeWire does not have any audio sinks, skipping` in mpv.log) and always fell through to Pulse, which also wasn't running (`Connection refused`). Starting `wireplumber` makes `wpctl status` immediately show both HDMI outputs (`Built-in Audio` ×2, one per `vc4hdmi` card) and a live default sink (`Built-in Audio Digital Stereo (HDMI)`). At that point mpv's default AO probe order (pipewire first) just works with **zero flags** — confirmed via `mpv.log` showing `AO: [pipewire] 48000Hz stereo 2ch floatp` / `audio ready`, and confirmed surviving a full reboot on both Pis (the enabled units restart automatically, no manual step needed after a power cycle).
+
+Applied identically to both pi1 and pi2 — both currently have `HDMI-A-1` connected and audio rides the same cable as video (PipeWire picks the default sink automatically; no explicit device selection needed since only one HDMI port is active on each).
+
+**Related fix, same session: stale `DURATION` in `config.env`.** Both Pis' `config.env` had `DURATION=200.875` left over from earlier short test content. When the production video was swapped for the real ~42-minute (2544.9s) file, this went unnoticed until checked directly — `_handle_sync`'s `position % duration` loop-math would have wrapped every ~200s against a file that's actually 2544s long, once the *next* boot re-read `config.env` (the already-running instance was unaffected since it had the old file's short duration burned into its live `PlaybackState`, matched to the old short file it opened at boot). Fixed by setting `DURATION=2544.917333` (from `ffprobe`) on both Pis and doing a clean reboot of both to pick up the new file, corrected duration, and the audio fix all at once. Post-reboot, confirmed single `client.py`/`mpv` per Pi (no double-mpv), both audio-ready, both drift-correcting normally.
 
 ### mpv IPC desync bug (fixed 2026-08-19/20)
 
