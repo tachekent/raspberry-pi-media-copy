@@ -52,9 +52,16 @@ if ! grep -q 'confdir /etc/chrony/conf.d' /etc/chrony/chrony.conf 2>/dev/null; t
 fi
 
 if [ "$ROLE" = "master" ]; then
+    # 192.168.0.0/16, not /8 (a /8 mask only covers the first octet — 192.0.0.0/8 —
+    # which is far broader than intended, if harmless on an isolated network).
+    # Also allow 169.254.0.0/16: when the two Pis are connected directly with no
+    # DHCP server (no switch), NetworkManager's ipv4.link-local=fallback (set
+    # below) self-assigns a 169.254.x.x address instead — chrony must accept
+    # client requests from that range too, or clock sync silently times out.
     sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
 local stratum 8
-allow 192.168.0.0/8
+allow 192.168.0.0/16
+allow 169.254.0.0/16
 EOF
     # Disable ptp4l if previously installed
     sudo systemctl disable --now ptp-master.service 2>/dev/null || true
@@ -76,6 +83,16 @@ EOF
     # Disable ptp4l if previously installed
     sudo systemctl disable --now ptp-slave.service 2>/dev/null || true
 fi
+
+# 3b. Fall back to a self-assigned link-local address (169.254.x.x) if no DHCP
+#     server responds — lets the two Pis be connected directly to each other
+#     with no switch/router, with no manual reconfiguration either way. Doesn't
+#     disturb the normal DHCP-via-switch path: "fallback" only kicks in when no
+#     other IPv4 address was obtained. pi1.local/pi2.local (mDNS/avahi) resolve
+#     fine over a link-local address too, so client.py's SERVER_IP=pi1.local
+#     needs no changes for either topology.
+sudo nmcli connection modify "Wired connection 1" ipv4.link-local fallback 2>/dev/null || \
+    echo "Warning: could not set ipv4.link-local fallback — check connection name with 'nmcli connection show'"
 
 # 4. Disable systemd-timesyncd — conflicts with chrony via adjtimex().
 #    Do NOT run `timedatectl set-ntp false`: on systems where chrony is the registered
