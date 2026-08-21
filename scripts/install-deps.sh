@@ -62,9 +62,14 @@ sudo apt install -y libplacebo-dev
 # fails to load and mpv exits with "option not found" on some flag combinations.
 sudo apt install -y liblua5.2-dev
 
-# Audio: needed at build time for audio driver detection even though audio is unused
-# on a headless Pi (no PipeWire/PulseAudio session in multi-user.target)
-sudo apt install -y libpipewire-0.3-dev libpulse-dev
+# Audio: -dev headers needed at build time for audio driver detection. The runtime
+# packages (pipewire itself, wireplumber, pipewire-pulse) are also required — on
+# Raspberry Pi OS Desktop they happen to already be present as part of the base
+# image, but that's incidental, not guaranteed (Lite doesn't ship them). Install
+# both explicitly so this works regardless of base image. Getting them actually
+# *running* headless (they normally only start in a desktop login session) is a
+# separate step handled in setup-autostart.sh.
+sudo apt install -y libpipewire-0.3-dev libpulse-dev pipewire pipewire-bin pipewire-pulse wireplumber
 
 # Add user to video + render groups (required for DRM master access on tty1)
 sudo usermod -aG video,render "$USER"
