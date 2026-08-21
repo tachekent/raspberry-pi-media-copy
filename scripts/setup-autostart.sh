@@ -2,6 +2,19 @@
 # Configure a Pi for headless autostart.
 # Run once on each Pi after copying the project.
 # Usage: ./scripts/setup-autostart.sh [master|slave]
+#
+# Normal deployment is the two Pis wired directly to each other with a single
+# cable — no switch, no router, no DHCP server. A switch is only ever used
+# temporarily during setup/dev (for internet access, SSH convenience, etc.).
+# Networking is static IPs for exactly this reason: direct connection has to
+# work reliably on every boot without negotiating anything, and a static
+# address comes up in well under a second regardless of what's plugged in —
+# no DHCP timeout, no link-local self-assignment, nothing that can behave
+# inconsistently. (An earlier version of this script tried DHCP-with-
+# link-local-fallback; dropped after physical testing showed it hangs boot
+# when there's no DHCP server present from the start, and recovery back to
+# DHCP once a switch reappears was inconsistent. See SETUP.md "Direct 1-1 Pi
+# connection, no switch" for that history.)
 
 set -euo pipefail
 
@@ -11,6 +24,13 @@ if [ "$ROLE" != "master" ] && [ "$ROLE" != "slave" ]; then
     exit 1
 fi
 
+# Fixed for exactly two Pis. Change here (and in the other Pi's config.env
+# SERVER_IP) if a different pair of addresses is ever needed.
+MASTER_IP=192.168.2.2
+SLAVE_IP=192.168.2.3
+GATEWAY_IP=192.168.2.1   # only used for internet access during setup/dev via a switch
+STATIC_IP=$([ "$ROLE" = "master" ] && echo "$MASTER_IP" || echo "$SLAVE_IP")
+
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SYSTEMD_DIR=/etc/systemd/system
 
@@ -19,7 +39,7 @@ echo "=== Setting up Pi Video Sync ($ROLE) ==="
 # 1. Create config.env if missing, then stamp ROLE into it
 if [ ! -f "$INSTALL_DIR/config.env" ]; then
     cp "$INSTALL_DIR/config.env.example" "$INSTALL_DIR/config.env"
-    echo "Created config.env — edit VIDEO, DURATION, and SERVER_IP before rebooting."
+    echo "Created config.env — edit VIDEO and DURATION before rebooting."
 fi
 # Write/update ROLE so autostart-client.sh knows which clock sync wait mode to use
 if grep -q '^ROLE=' "$INSTALL_DIR/config.env" 2>/dev/null; then
@@ -28,13 +48,13 @@ else
     echo "ROLE=$ROLE" >> "$INSTALL_DIR/config.env"
 fi
 
-# Master runs server.py locally — set SERVER_IP so client.py can connect to it
-if [ "$ROLE" = "master" ]; then
-    if grep -q '^SERVER_IP=' "$INSTALL_DIR/config.env" 2>/dev/null; then
-        sed -i "s|^SERVER_IP=.*|SERVER_IP=localhost|" "$INSTALL_DIR/config.env"
-    else
-        echo "SERVER_IP=localhost" >> "$INSTALL_DIR/config.env"
-    fi
+# Master runs server.py locally — client.py talks to it over localhost.
+# Slave talks to the master's static IP directly (not pi1.local/mDNS) — one
+# less moving part in the critical path; avahi is only needed for SSH access.
+if grep -q '^SERVER_IP=' "$INSTALL_DIR/config.env" 2>/dev/null; then
+    sed -i "s|^SERVER_IP=.*|SERVER_IP=$([ "$ROLE" = "master" ] && echo localhost || echo "$MASTER_IP")|" "$INSTALL_DIR/config.env"
+else
+    echo "SERVER_IP=$([ "$ROLE" = "master" ] && echo localhost || echo "$MASTER_IP")" >> "$INSTALL_DIR/config.env"
 fi
 
 # 2. Make scripts executable
@@ -54,20 +74,16 @@ fi
 if [ "$ROLE" = "master" ]; then
     # 192.168.0.0/16, not /8 (a /8 mask only covers the first octet — 192.0.0.0/8 —
     # which is far broader than intended, if harmless on an isolated network).
-    # Also allow 169.254.0.0/16: when the two Pis are connected directly with no
-    # DHCP server (no switch), NetworkManager's ipv4.link-local=fallback (set
-    # below) self-assigns a 169.254.x.x address instead — chrony must accept
-    # client requests from that range too, or clock sync silently times out.
     sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
 local stratum 8
 allow 192.168.0.0/16
-allow 169.254.0.0/16
 EOF
     # Disable ptp4l if previously installed
     sudo systemctl disable --now ptp-master.service 2>/dev/null || true
 else
+    # Static IP, not pi1.local — see the networking section below.
     sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
-server pi1.local iburst prefer minpoll 2 maxpoll 4
+server $MASTER_IP iburst prefer minpoll 2 maxpoll 4
 EOF
     # Disable the default internet pool so chrony syncs from master only.
     # chrony's 'prefer' keyword doesn't override a stratum gap — internet pool
@@ -84,15 +100,16 @@ EOF
     sudo systemctl disable --now ptp-slave.service 2>/dev/null || true
 fi
 
-# 3b. Fall back to a self-assigned link-local address (169.254.x.x) if no DHCP
-#     server responds — lets the two Pis be connected directly to each other
-#     with no switch/router, with no manual reconfiguration either way. Doesn't
-#     disturb the normal DHCP-via-switch path: "fallback" only kicks in when no
-#     other IPv4 address was obtained. pi1.local/pi2.local (mDNS/avahi) resolve
-#     fine over a link-local address too, so client.py's SERVER_IP=pi1.local
-#     needs no changes for either topology.
-sudo nmcli connection modify "Wired connection 1" ipv4.link-local fallback 2>/dev/null || \
-    echo "Warning: could not set ipv4.link-local fallback — check connection name with 'nmcli connection show'"
+# 3b. Static IP on eth0 — see the big comment at the top of this file for why.
+#     Preserves the gateway/DNS so setup-time internet access via a switch
+#     still works; the sync system itself never needs a gateway.
+sudo nmcli connection modify "Wired connection 1" \
+    ipv4.method manual \
+    ipv4.addresses "$STATIC_IP/24" \
+    ipv4.gateway "$GATEWAY_IP" \
+    ipv4.dns "$GATEWAY_IP" \
+    connection.autoconnect-priority 0
+echo "Static IP set to $STATIC_IP/24 (takes effect on reboot, or now via: sudo nmcli connection up 'Wired connection 1')"
 
 # 4. Disable systemd-timesyncd — conflicts with chrony via adjtimex().
 #    Do NOT run `timedatectl set-ntp false`: on systems where chrony is the registered
@@ -180,8 +197,6 @@ echo "=== Done ==="
 echo "Before rebooting, edit: $INSTALL_DIR/config.env"
 echo "  - Set VIDEO to the full path of your video file"
 echo "  - Set DURATION to the video length in seconds"
-if [ "$ROLE" = "slave" ]; then
-    echo "  - Set SERVER_IP to the master Pi's IP address"
-fi
+echo "(SERVER_IP and the static network address are already set for you)"
 echo ""
 echo "Then reboot: sudo reboot"
