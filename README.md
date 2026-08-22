@@ -309,17 +309,19 @@ This happens automatically when `--sync-interval` is enabled.
 - **Wrong resolution** → CPU software scaling → frame drops on 4K content
 - **Wrong refresh rate** → cadence judder (e.g. 60Hz display + 25fps video = 2.4:1 ratio; each frame alternates between 2 and 3 display refreshes)
 
-**Set `DRM_MODE` in each Pi's `config.env`** to force the right mode at playback time — no reboot needed, takes effect on next client restart:
+**Set `DRM_MODE` in each Pi's `config.env`/`standalone.env`** to force the right mode at playback time — no reboot needed, takes effect on next client restart. Pick it automatically:
 
 ```bash
-# On each Pi, edit ~/pi-video-sync/config.env:
-DRM_MODE=3840x2160@25    # production projectors, 25fps video
+python3 scripts/calibrate-drm-mode.py
 ```
 
-List available modes on a Pi:
+This reads `VIDEO=` from `config.env`/`standalone.env` (whichever exists), checks its frame rate against every mode the connected display actually supports, and writes the best match — one with a clean integer-multiple refresh rate (avoiding judder) at the resolution closest to the video's native one (minimizing software-scaling CPU cost) — back into the config.
+
+To do it by hand instead: list available modes on a Pi with
 ```bash
 /usr/local/bin/mpv --vo=drm --drm-mode=help /dev/null 2>&1 | grep Mode
 ```
+then set e.g. `DRM_MODE=3840x2160@25` for 25fps video on a display that supports that exact mode.
 
 Use the exact Hz shown — mpv matches literally (`@50` won't match `@49.99Hz`).
 
