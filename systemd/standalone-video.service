@@ -1,0 +1,28 @@
+[Unit]
+Description=Standalone Looping Video Playback (no sync — single Pi only)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=pipe
+WorkingDirectory=/home/pipe/pi-video-sync
+# drm-copy uses the render node, not DRM master — no logind seat needed,
+# so a bare system service works fine (unlike client.py's tty1-autologin
+# dance on pi1/pi2, which exists for a different reason: giving client.py's
+# terminal a real seat isn't why this is a service instead — this project
+# just doesn't need it here since there's no client.py in the standalone case).
+#
+# XDG_RUNTIME_DIR must be set explicitly: a real login session (like tty1
+# autologin) gets this from pam_systemd automatically, but a plain system
+# service does not, and PipeWire's client libraries need it to find the
+# user's PipeWire socket at /run/user/<uid>/pipewire-0. Without this, mpv
+# falls back to silent playback with no error — same failure mode as the
+# original headless-audio investigation, just a different cause. Verify the
+# pipe user's UID with `id pipe` if this is ever not 1000.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/home/pipe/pi-video-sync/scripts/run-standalone-video.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

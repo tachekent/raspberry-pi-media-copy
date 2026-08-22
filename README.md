@@ -130,6 +130,48 @@ On boot, the sequence is:
 
 ---
 
+## Standalone Mode (Single Pi, One Looping Video)
+
+For a Pi with nothing else to stay in sync with — just one screen, one video, looping forever. None of the server/client sync machinery (chrony/PTP clock sync, drift correction) applies here; that all exists solely to keep *multiple* Pis' playback positions aligned with each other. mpv's own `--loop` flag handles looping on its own.
+
+### 1. Install dependencies
+
+```bash
+./scripts/install-deps.sh
+```
+
+(This also installs `chrony`, unused in standalone mode — harmless, just shared setup infra.)
+
+### 2. Copy your video
+
+```bash
+scp film.mp4 pipe@pi3.local:~/video.mp4
+```
+
+### 3. Run the setup script
+
+```bash
+./scripts/setup-standalone.sh
+```
+
+### 4. Edit standalone.env
+
+```bash
+nano ~/pi-video-sync/standalone.env
+```
+
+Set `VIDEO` to the video's path, and `DRM_MODE` if needed (see "Display Resolution and Refresh Rate" below).
+
+### 5. Start it
+
+```bash
+sudo reboot
+# or, without rebooting:
+sudo systemctl start standalone-video.service
+```
+
+---
+
 ## Manual / Development Mode
 
 To run everything by hand (useful for testing):
@@ -178,10 +220,13 @@ python3 controller/play.py /path/to/video.mp4 --loop --duration 2400
 .
 ├── ARCHITECTURE.md          # Design rationale and alternatives considered
 ├── README.md                # This file
-├── config.env.example       # Copy to config.env and edit on each Pi
+├── config.env.example       # Copy to config.env and edit on each Pi (2-Pi sync mode)
+├── standalone.env.example   # Copy to standalone.env and edit (single-Pi mode)
 ├── scripts/
 │   ├── install-deps.sh      # Install required packages
-│   ├── setup-autostart.sh   # Configure headless autostart (run once per Pi)
+│   ├── setup-autostart.sh   # Configure headless autostart, 2-Pi sync mode (run once per Pi)
+│   ├── setup-standalone.sh  # Configure a standalone single-video-loop Pi (run once)
+│   ├── run-standalone-video.sh # mpv wrapper for standalone-video.service
 │   ├── wait-ptp-lock.sh     # Wait for PTP to lock before autoplay
 │   ├── make_drift_test.sh   # Generate a sync drift test video
 │   ├── ptp-master.sh        # Start PTP master (manual mode)
@@ -198,7 +243,8 @@ python3 controller/play.py /path/to/video.mp4 --loop --duration 2400
     ├── ptp-slave.service    # PTP slave (slave Pi)
     ├── sync-server.service  # Sync server (master Pi)
     ├── sync-client.service  # Sync client (all Pis)
-    └── sync-autoplay.service # Autoplay trigger (master Pi)
+    ├── sync-autoplay.service # Autoplay trigger (master Pi)
+    └── standalone-video.service # Single-Pi looping playback, no sync
 ```
 
 ## Drift Test Video
