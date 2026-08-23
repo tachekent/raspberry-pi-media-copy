@@ -69,7 +69,13 @@ sudo apt install -y liblua5.2-dev
 # both explicitly so this works regardless of base image. Getting them actually
 # *running* headless (they normally only start in a desktop login session) is a
 # separate step handled in setup-autostart.sh.
-sudo apt install -y libpipewire-0.3-dev libpulse-dev pipewire pipewire-bin pipewire-pulse wireplumber
+#
+# libspa-0.2-bluetooth: PipeWire's Bluetooth A2DP plugin. Same "present on
+# Desktop, missing on Lite" trap as the packages above — without it, pairing
+# succeeds but connect() fails with br-connection-profile-unavailable, since
+# nothing registers an audio profile with bluetoothd for it to connect. Only
+# needed if using Bluetooth audio output; harmless to always install.
+sudo apt install -y libpipewire-0.3-dev libpulse-dev pipewire pipewire-bin pipewire-pulse wireplumber libspa-0.2-bluetooth
 
 # Add user to video + render groups (required for DRM master access on tty1)
 sudo usermod -aG video,render "$USER"
