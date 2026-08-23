@@ -1,0 +1,13 @@
+[Unit]
+Description=Reconnect to paired Bluetooth audio device (best-effort, doesn't block playback)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=oneshot
+User=pipe
+WorkingDirectory=/home/pipe/pi-video-sync
+ExecStart=/home/pipe/pi-video-sync/scripts/bluetooth-reconnect.sh
+
+[Install]
+WantedBy=multi-user.target

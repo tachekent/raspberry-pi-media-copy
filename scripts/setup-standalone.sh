@@ -36,12 +36,43 @@ chmod +x "$INSTALL_DIR/scripts/"*.sh
 #    not a fallback option here.
 sudo loginctl enable-linger pipe
 systemctl --user enable pipewire.service pipewire.socket wireplumber.service pipewire-pulse.service pipewire-pulse.socket
+
+# 3b. Bluetooth audio output (optional — harmless if never used). Two gotchas
+# found the hard way pairing a real speaker against this exact setup:
+#  - libspa-0.2-bluetooth (PipeWire's A2DP plugin) is in install-deps.sh now,
+#    but wasn't historically — without it, pairing succeeds but connect()
+#    fails with br-connection-profile-unavailable (nothing registers an
+#    audio profile with bluetoothd for it to hand the connection to).
+#  - WirePlumber's bluez monitor gates on monitor.bluez.seat-monitoring,
+#    which requires a real logind *seat* — a lingering-but-never-logged-in
+#    background session (this whole setup) has no seat, so the monitor loads
+#    but silently never enumerates the adapter. Disabled here the same way
+#    WirePlumber's own "main-systemwide" profile mixin does for exactly this
+#    class of headless setup. (pi1/pi2's tty1-autologin setup likely doesn't
+#    need this — a real console autologin gets an actual seat0 — untested.)
+sudo mkdir -p /etc/wireplumber/wireplumber.conf.d
+sudo tee /etc/wireplumber/wireplumber.conf.d/51-headless-bluetooth.conf > /dev/null <<'EOF'
+wireplumber.profiles = {
+  main = {
+    monitor.bluez.seat-monitoring = disabled
+    support.logind = disabled
+  }
+}
+EOF
+
 systemctl --user start pipewire wireplumber pipewire-pulse 2>/dev/null || true
 
 # 4. Install and enable the playback service
 sudo cp "$INSTALL_DIR/systemd/standalone-video.service" "$SYSTEMD_DIR/"
 sudo systemctl daemon-reload
 sudo systemctl enable standalone-video.service
+
+# 5. Bluetooth auto-reconnect (best-effort, only does anything if
+#    BLUETOOTH_MAC is set in standalone.env — see that file for how to pair
+#    a device first). Doesn't block playback; see bluetooth-reconnect.sh.
+sudo cp "$INSTALL_DIR/systemd/bluetooth-reconnect.service" "$SYSTEMD_DIR/"
+sudo systemctl daemon-reload
+sudo systemctl enable bluetooth-reconnect.service
 
 echo ""
 echo "=== Done ==="
