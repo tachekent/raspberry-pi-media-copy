@@ -533,7 +533,7 @@ class SyncClient:
             drm_mode = os.environ.get('DRM_MODE', '')
             if drm_mode:
                 cmd.append(f'--drm-mode={drm_mode}')
-            if os.environ.get('SYNC_OVERLAY', ''):
+            if os.environ.get('SYNC_OVERLAY', '') not in ('', '0'):
                 cmd.extend([
                     '--osd-level=1',
                     '--osd-msg1=${playback-time/full}  f${estimated-frame-number}',

@@ -26,6 +26,10 @@ if [ -n "${DRM_MODE:-}" ]; then
     cmd+=(--drm-mode="$DRM_MODE")
 fi
 
+if [ -n "${AUDIO_DELAY:-}" ]; then
+    cmd+=(--audio-delay="$AUDIO_DELAY")
+fi
+
 cmd+=("$VIDEO")
 
 exec "${cmd[@]}"
