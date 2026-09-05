@@ -11,11 +11,22 @@ so clients can correct drift or late-joiners can sync up.
 
 import argparse
 import json
+import os
 import socket
 import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+
+def broadcast_targets() -> list:
+    """Addresses to broadcast to — see play.py's copy of this function for why
+    '<broadcast>' alone isn't enough on a multi-homed Pi (e.g. wifi + ethernet
+    both up) and what BROADCAST_EXTRA_ADDRS does."""
+    targets = ['<broadcast>']
+    extra = os.environ.get('BROADCAST_EXTRA_ADDRS', '')
+    targets.extend(a.strip() for a in extra.split(',') if a.strip())
+    return targets
 
 
 class PlaybackState:
@@ -240,7 +251,8 @@ class SyncServer:
     def broadcast(self, message: dict):
         """Broadcast a message to all clients via UDP"""
         data = json.dumps(message).encode()
-        self.udp_socket.sendto(data, ('<broadcast>', self.broadcast_port))
+        for target in broadcast_targets():
+            self.udp_socket.sendto(data, (target, self.broadcast_port))
 
     def play(
         self,

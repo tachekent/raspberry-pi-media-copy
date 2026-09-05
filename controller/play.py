@@ -8,8 +8,28 @@ via UDP broadcast.
 
 import argparse
 import json
+import os
 import socket
 import time
+
+
+def broadcast_targets() -> list:
+    """Addresses to broadcast to.
+
+    '<broadcast>' (INADDR_BROADCAST / 255.255.255.255) only actually goes out
+    the interface tied to the default route on a multi-homed Pi — it does NOT
+    fan out to every interface. A Pi with both eth0 and wlan0 up (e.g. testing
+    a wifi link alongside the existing direct-ethernet one) needs an explicit
+    directed broadcast for the other subnet too (e.g. 192.168.3.255 for a
+    192.168.3.0/24 wifi link), since that's routed by destination network
+    rather than by default route. BROADCAST_EXTRA_ADDRS (comma-separated) adds
+    targets on top of the universal broadcast, so existing ethernet-only setups
+    are unaffected — this is additive, not a replacement.
+    """
+    targets = ['<broadcast>']
+    extra = os.environ.get('BROADCAST_EXTRA_ADDRS', '')
+    targets.extend(a.strip() for a in extra.split(',') if a.strip())
+    return targets
 
 
 def broadcast_play(
@@ -43,7 +63,8 @@ def broadcast_play(
     # Broadcast multiple times for reliability
     data = json.dumps(message).encode()
     for _ in range(3):
-        sock.sendto(data, ('<broadcast>', port))
+        for target in broadcast_targets():
+            sock.sendto(data, (target, port))
         time.sleep(0.01)
 
     sock.close()
@@ -59,7 +80,8 @@ def broadcast_stop(port: int):
     data = json.dumps(message).encode()
 
     for _ in range(3):
-        sock.sendto(data, ('<broadcast>', port))
+        for target in broadcast_targets():
+            sock.sendto(data, (target, port))
         time.sleep(0.01)
 
     sock.close()
@@ -87,7 +109,8 @@ def broadcast_sync(
     }
 
     data = json.dumps(message).encode()
-    sock.sendto(data, ('<broadcast>', port))
+    for target in broadcast_targets():
+        sock.sendto(data, (target, port))
     sock.close()
     print("Sync command sent.")
 
