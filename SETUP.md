@@ -35,6 +35,85 @@ Software scaler. Used when the video resolution doesn't match the display output
 
 ---
 
+## Hardware Decode: Complete Requirements Checklist (verified 2026-09-06 against a live, working pi1)
+
+Everything below was checked against a real running board, not written from memory — commands to reproduce each check are included so this can be re-verified on any Pi or after any reimage.
+
+### 1. OS / kernel
+
+- Raspberry Pi OS (Debian 13 "trixie"), kernel `6.18.34+rpt-rpi-2712` or later. Verify: `cat /etc/os-release; uname -r`.
+- The Raspberry Pi Foundation's own apt archive must be enabled (`archive.raspberrypi.com`, present by default on Raspberry Pi OS, check `/etc/apt/sources.list.d/raspi.sources`). This is what serves the `rpt1`-patched `ffmpeg` build — the one with V4L2 HEVC stateless support baked in. A vanilla Debian `ffmpeg` package does **not** have this.
+
+### 2. `config.txt`
+
+The only line actually required for KMS/DRM display output is:
+```
+dtoverlay=vc4-kms-v3d
+```
+This is what makes `--vo=drm` possible at all — without it you're on the legacy firmware framebuffer, not full KMS. On a stock Raspberry Pi OS image this is present by default; if a config.txt was hand-built or stripped down, this is the one line that can't be missing. `disable_fw_kms_setup=1` (also present by default) prevents the firmware from doing its own conflicting KMS setup. Nothing else in config.txt is required specifically for HEVC decode — no `dtoverlay=` line is needed for the decoder itself; it's a kernel driver, not a device-tree-gated peripheral. Verify: `cat /boot/firmware/config.txt`.
+
+### 3. Kernel driver & device nodes
+
+The decoder loads as a normal kernel module, `rpi_hevc_dec` (note: underscore in `lsmod`, hyphen in the driver name `rpi-hevc-dec` — both refer to the same thing), pulling in `v4l2_mem2mem`, `videobuf2_*`, and `videodev`. It loads automatically on first use; if the device nodes below are missing after a reboot, `sudo modprobe rpi-hevc-dec` loads it manually. Verify: `lsmod | grep -i hevc`.
+
+Expected device nodes (exact minor numbers can vary; presence is what matters):
+- `/dev/media2` — media controller for the decoder
+- `/dev/video19` — the actual decoder node
+- `/dev/dri/card1` — DRM card node (KMS display)
+- `/dev/dri/renderD128` — DRM render node (this is the one `drm-copy` actually opens)
+
+Verify: `ls /dev/media* /dev/video19 /dev/dri/`.
+
+### 4. User permissions
+
+The user running mpv must be in both the `video` and `render` groups (`/dev/dri/renderD128` is group `render`; the media/video device nodes are group `video`). `install-deps.sh` does this via `sudo usermod -aG video,render "$USER"`. Verify: `groups <user>` — both must appear. Missing `render` specifically produces a "Permission denied" opening the render node with no other obvious symptom, easy to mistake for a driver problem.
+
+### 5. GPU memory split
+
+`gpu_mem` does **not** need to be raised for this — `drm-copy` decode uses DMA-BUF/CMA allocation via V4L2, not the legacy GPU memory pool. A stock split (`gpu=8M` observed on a working board) is fine; don't waste time increasing it as a "fix" for decode issues.
+
+### 6. mpv build
+
+Covered in full above ("mpv from Source") — built from source specifically to link against the `rpt1` ffmpeg headers, since the apt `mpv` package does not correctly pick up `--hwdec=drm-copy` against it. Not repeated here; see that section for the exact deps and why each is non-obvious.
+
+### 7. Runtime flags
+
+`--hwdec=drm-copy --vo=drm` — see the flag table below (unchanged from before). This is the only combination confirmed working on Pi 5's stateless decoder.
+
+### 8. How to actually verify hardware decode is active (not just "no errors")
+
+**A generic `ffmpeg` CLI command is not a reliable way to check this on Pi 5** — worth knowing, because it's the first thing anyone reaches for and it's misleading here:
+- `ffmpeg -hwaccel drm -i file.mp4 ...` silently falls back to **software decode** (confirmed live: produced a `wrapped_avframe` output stream at 0.5x realtime speed, no error, no acceleration — nothing in the output tells you it didn't accelerate).
+- `ffmpeg -c:v hevc_v4l2m2m -i file.mp4 ...` **fails outright** ("Could not find a valid device") — this decoder wrapper targets the Pi 4-style stateful V4L2 M2M API, which doesn't exist on Pi 5's stateless decoder. Its presence in `ffmpeg -decoders` output doesn't mean it works here.
+
+The actual reliable check is mpv's own log, since mpv talks to the stateless decoder via the media-request API directly rather than through either of the above:
+```bash
+grep -i "Using hardware decoding" ~/pi-video-sync/logs/mpv.log
+# Expected: [i][vd] Using hardware decoding (drm-copy).
+```
+If this line is absent or says `(no)`, decode fell back to software regardless of what flags were passed — check `mpv.log` for `Looking at hwdec hevc-drm-copy... failed` just above it for the reason.
+
+### 9. Source video requirements (the encoding side, not just playback config)
+
+**Codec — this is the biggest trap**: Pi 5 has hardware decode for **HEVC (H.265) only**. Unlike Pi 4, **Pi 5 does not have H.264 hardware decode at all** — H.264 content silently falls back to software decode on Pi 5 (the CPU is fast enough that 1080p H.264 often still plays fine, masking the fact that it's not accelerated — but 4K H.264 will not). If a source file is H.264, re-encode it to HEVC first; there is no flag that makes H.264 hardware-accelerated on this hardware.
+
+**Profile / pixel format**: stick to HEVC **Main profile, 8-bit, 4:2:0** (`yuv420p`) — this project's actual production files are already encoded this way (confirmed via `ffprobe`) and are exactly what's been validated working. 10-bit (Main10) support in this driver stack is reported incomplete elsewhere in the Pi ecosystem (GStreamer's implementation is documented 8-bit only) — nothing here confirms Main10 is broken specifically for mpv's path, but there's no confirmed-working evidence for it either, so treat 10-bit/Main10 sources as untested risk, not a safe assumption. Re-encode to 8-bit 4:2:0 rather than assume it'll "just work."
+
+**Bitrate mode — directly relevant to this project's own frame-timing investigation**: the sync client's own code comments (`client.py`, `speed_bias` logic) document that this project's actual production file shows "content-dependent plateaus" in decode/timing behavior — i.e. real, measured, scene-dependent variability under this file's variable bitrate (VBR) encoding. That's a real, evidenced mechanism for exactly the kind of moment-to-moment inconsistency seen throughout this investigation's `mistimed-frame-count` measurements (different tests landing on different scenes of the same long VBR file gave meaningfully different results). Constraining the encode to a bounded rate — VBV-capped or true CBR — makes memory-bandwidth demand far more uniform across the whole file, which won't fix a hardware-level margin problem but removes a real, independent source of variability that's currently confounding every measurement taken against this file. Recommended `ffmpeg`/x265 encode:
+```bash
+ffmpeg -i input.mov -c:v libx265 -profile:v main -pix_fmt yuv420p -preset medium \
+  -x265-params "vbv-maxrate=25000:vbv-bufsize=50000:strict-cbr=1" \
+  -g 50 -c:a aac -b:a 192k output.mp4
+```
+- `vbv-maxrate`/`vbv-bufsize`: set `vbv-maxrate` near the current file's actual average bitrate (this project's real file measures ~23.3Mbps via `ffprobe`), `vbv-bufsize` at roughly 2x that — a widely-used default ratio, not a hard rule. `strict-cbr=1` forces x265 to hold the rate rather than just capping peaks, at some cost to quality-per-bit versus unconstrained VBR.
+- `-profile:v main -pix_fmt yuv420p`: forces 8-bit 4:2:0 explicitly rather than trusting the encoder's default profile selection from the source.
+- `-g 50`: keyframe interval — this project's existing files already use a ~50-frame (2s at 25fps) GOP, which the sync client's own comment cites as its assumed worst-case hard-seek latency bound (`client.py`: "bounded by GOP size — currently 50 frames / 2s worst case"). A shorter GOP tightens hard-seek convergence time at the cost of file size/quality-per-bit; no evidence in this investigation suggests the current value is a problem, so this isn't a recommended change, just documentation of the existing assumption should it ever need revisiting.
+- **Not recommended based on evidence gathered here**: tuning B-frame count/reference structure. Decode framerate (`estimated-vf-fps`) stayed locked at the exact source rate in every single test this whole investigation, on every board, good or bad — decode throughput was never shown to be the bottleneck at any point. Encoder-side complexity tuning aimed at decode load is solving a problem that hasn't actually been observed here; the bottleneck in every confirmed-bad case was presentation/page-flip timing, not decode capacity.
+
+**Resolution/framerate**: match (or use an exact integer/rational multiple of) the actual display's native refresh — already established practice in this project via `calibrate-drm-mode.py`, not a new requirement, just confirming it belongs on this checklist.
+
+---
+
 ## Hardware Decode
 
 ### What's actually happening
@@ -546,6 +625,71 @@ Asked to restart pi1/pi2 (the 2-Pi direct-connect sync setup, unrelated boards t
 - To actually pause a board without triggering this, stop `getty@tty1.service` *first*, then kill `client.py`/`mpv`, do whatever testing is needed, then `systemctl start getty@tty1.service` again to bring it back cleanly.
 - `sync-server.service`'s playback-state tracking is in-memory only (populated by snooping `play.py`'s own broadcasts) — restarting it wipes that state, so it stops broadcasting sync messages entirely (thinking nothing is playing) until `sync-autoplay.service` is restarted to re-fire `play.py`. Don't restart `sync-server.service` casually; if you do, follow it with a `sync-autoplay.service` restart.
 - `pkill` silently failed/blocked in this session's tool environment for reasons never diagnosed (exit 255, no output at all) where plain `kill <pid>` worked fine every time — prefer `kill` with explicit PIDs over `pkill -f` patterns here.
+
+---
+
+## Pi4 fleet-member investigation (2026-09-06) — hardware decode confirmed, severe unexplained jitter, likely wrong software stack
+
+Context: exploring adding Pi4 boards to the fleet (H.264 was the original ask, but Pi4's hardware decode is H.264-up-to-1080p60 / HEVC-up-to-4Kp60 only — confirmed against Raspberry Pi's own product brief — so HEVC, same as the Pi5 boards, is the only codec with real 4K hardware decode on Pi4 too; there was never a case for a separate H.264 pipeline). Also checked this project's own git history back to the initial commit (`d774b0e`, Feb 2026) — it has been Pi5-only since day one, no Pi4-origin evidence anywhere in this repo.
+
+### Setup
+
+First attempt was on a Desktop image (matches how pi1/pi2 originally started, later stripped down — only pi3 ever got a clean from-scratch Lite install). Desktop's `lightdm`+`labwc` compositor holds DRM master at boot, so `--vo=drm` can never acquire it (`Failed to acquire DRM master: Permission denied`) — this is a hard blocker, not a workaround-able config issue, without stopping the graphical session. Reimaged as Lite to match the rest of the fleet and avoid stacking an unknown Desktop-specific quirk on top of an already-unknown board. `rpi_hevc_dec` loads automatically with zero special `dtoverlay` needed (contrary to some older, 2022-2023-era forum guidance suggesting `dtoverlay=rpivid-v4l2` is required — not the case on this current kernel, `6.18.34+rpt-rpi-v8`). This project's existing `install-deps.sh`/mpv-from-source build worked unmodified on Pi4/Trixie — no Pi4-specific code changes were needed to get hardware decode itself working.
+
+Board: Raspberry Pi 4 Model B Rev 1.5, 2GB RAM (smaller than every Pi5 in the fleet), serial `10000000b86031c1`.
+
+**Passwordless sudo isn't set up by default the way it apparently is on the rest of the fleet** — needed `echo 'pipe ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/010_pipe-nopasswd` run manually (twice — once per image, Desktop then Lite) before any automation could proceed.
+
+### Hardware decode: confirmed genuinely working
+
+`grep -i "Using hardware decoding" mpv.log` → `Using hardware decoding (drm-copy)`, `hwdec-current: drm-copy` (not software fallback), decode locked at exact 25.000fps. Same driver family, same device nodes (`/dev/media2`, `/dev/video19`) as Pi5. No mpv/flag changes needed — `--hwdec=drm-copy --vo=drm` works unmodified on Pi4.
+
+### Problem 1 (resolved): thermal throttling, board was passively cooled and enclosed
+
+Initial test showed `throttled=0xe0006`/`0xe0008` (currently under-voltage-capped AND thermally throttled, plus history bits), 84°C, and playback genuinely running at **~31% of real-time speed** (measured directly: 3.6s of `playback-time` advanced per 11.49s of wall-clock time) — this is a real, severe symptom, not just occasional jitter, quantified precisely. Root cause: CPU was pegged at ~270-290% (near-saturating all 4 cores) the whole time.
+
+**What's actually consuming that CPU**: per-thread breakdown (`top -H -p <pid>`) showed the `vo` thread (~70%) plus three `zimg` colorspace-conversion `worker` threads (~70/60/60%) — decode itself isn't in this list at all (it's on the dedicated hardware block, off the CPU). This `zimg` conversion step is **not new or Pi4-specific** — this project's own docs already noted "CPU cost of the DRM VO's software color-conversion path (zimg, 3 worker threads, both Pis)" from the original pi3 investigation. It was simply cheap enough on Pi5's A76 cores to be invisible; on Pi4's much weaker A72 cores, the identical fixed conversion cost saturates the CPU and triggers thermal throttling.
+
+Checked whether the conversion is avoidable: the DRM overlay/drmprime plane genuinely supports `NV12`/`YU12`/`YV12` natively (confirmed via `modetest -p`, needed installing `libdrm-tests` first — not present on a fresh image), but a debugfs state dump showed that plane sitting at `fb=0` (unused) while the *primary* plane is what's actually active — mpv is routing through `zimg` into an RGB primary-plane path instead of using the overlay plane's native YUV support directly. Most likely a format-modifier/stride mismatch between what the Pi4 decoder exports and what mpv's `drmprime` negotiation recognizes as directly usable on this SoC generation — not something fixable with a flag; would need a newer mpv/ffmpeg or real patch work to pursue further.
+
+**Fix applied**: removed the board from its case (passive cooling, no fan). Idle temp dropped from ~84°C to 43°C immediately, and a repeat test showed clean real-time playback pace (0.997x, essentially exact), `throttled=0x0` throughout, and CPU usage during that specific window was also much lower (~72% vs ~270% before) — though note the CPU figure isn't perfectly apples-to-apples since this is variable-bitrate content and different tests landed on different scene complexity, a confound this whole investigation has run into repeatedly. **This board needs active cooling (fan) for production use** — it cannot sustain this workload passively enclosed.
+
+### Problem 2 (NOT resolved, root cause unknown): severe frame-timing jitter persists even with thermal issue fixed
+
+After the case-removal fix, a fresh test showed **88-163% of frames per 15s window flagged by `mistimed-frame-count`** — worse than any board in this entire project's history (the original defective pi3 board topped out around 15-59% across various tests). This is despite: clean thermal state throughout (67-68°C, `throttled=0x0`), decode still locked at exact 25.000fps, and the user visually confirming severe, obvious jumping on screen (not just a measurement artifact).
+
+**Ruled out, in order**:
+1. Thermal/throttling — clean bitmask and stable temp during this specific test.
+2. Physical HDMI/power cable seating — user confirmed both fully seated.
+3. Under-voltage or HDMI hotplug/disconnect events — `dmesg` showed neither during the test window (this also argues against a marginal/intermittent cable connection specifically, since that would show hotplug churn).
+4. Missing `hdmi_enable_4kp60=1` in `config.txt` — the kernel itself logged `[drm] Please change your config.txt file to add hdmi_enable_4kp60.` at boot, a concrete and specific-sounding lead; added it, rebooted, confirmed the warning was gone on the next boot — **no change in jitter severity**.
+
+**Not yet investigated**: nothing else was tried before the session ended — this is a genuinely open problem, not a red herring that's been fully chased down.
+
+### The actual likely explanation: wrong software stack for Pi4, per prior project history
+
+A sibling project directory (`../raspberry-pi-media`, this repo's predecessor/relative) has a `README.md` documenting a **previously working** Pi4 4K HEVC standalone player — but built on **LibreELEC (Kodi's own player engine)**, not Raspberry Pi OS + mpv. Relevant details from that doc:
+- Working content there was **Main10, 10-bit** (`yuv420p10le`) — different from the Main-profile-8-bit assumption made in the Hardware Decode Requirements Checklist above (which was written from Pi5 evidence only). Kodi's decode path may differ enough from mpv's `drm-copy` path that this isn't directly transferable, but it's a data point against assuming 8-bit is required.
+- That doc explicitly records that **VLC was tried first and "had difficulty with the data rate and the video quickly became choppy"** on this same hardware class — independent historical confirmation that Pi4 at 4K/HEVC is a genuinely tight fit for a naive player, not unique to today's mpv attempt.
+- That doc's own "next time" section says they wanted to try mpv next — which is exactly what this project did, just built and validated Pi5-first, then retrofitted onto Pi4 today without ever validating the `--vo=drm`+`zimg` path against Pi4's older VC4 HDMI driver specifically.
+
+**Working hypothesis for a fresh session**: the mpv+`--vo=drm` pipeline this whole project is built around may simply not be the right stack for Pi4 — Kodi/LibreELEC achieved smooth playback on this same hardware class before, where a generic player (VLC) failed with similar symptoms to what's being seen here. Pursuing this would mean either (a) scripting Kodi's own JSON-RPC/`kodi-send` remote-control interface into something equivalent to `client.py`'s drift-correction sync, or (b) accepting a Pi4 fleet member as standalone/non-synced only. Not yet decided or started.
+
+**Full LibreELEC reimage is not required to try this.** Kodi has an official standalone **GBM** mode — no X11/Wayland/desktop session needed, boots straight into fullscreen Kodi via a systemd service, matching this project's existing `standalone-video.service` pattern exactly. Install via `sudo apt install kodi21` (or current package name) directly on the same Raspberry Pi OS Lite image already used for the rest of the fleet — no OS change needed, keeps SSH/scripting/deployment identical. GBM is documented as the most feature-complete of Kodi's three windowing backends (X11/Wayland/GBM) and the only one supporting HDR. Reference systemd setup: `graysky2/kodi-standalone-service` on GitHub, linked from Kodi's own wiki (`HOW-TO:Autostart_Kodi_for_Linux`). Kodi's JSON-RPC API is available identically whether running this way or under LibreELEC, so the sync-scripting question is unaffected by this choice. **Not yet attempted** — next concrete step for a fresh session.
+
+### Planned next test (not yet started): Kodi on pi2 as a diagnostic, not just a Pi4 workaround
+
+Idea from a follow-up discussion, worth running before drawing final conclusions on the pi1/pi2 MFG_VER story above: keep **pi1 on mpv** exactly as-is (it's clean, proven, no reason to touch it), and put **pi2** (the MFG_VER=1 board with persistent, unexplained jitter — see "pi1/pi2 frame-timing digression" above) on Kodi standalone/GBM instead of mpv, then try syncing the two.
+
+**Why this is a genuine diagnostic, not just a Pi4-style workaround attempt**: it directly separates two possibilities this project has never been able to distinguish for pi2 specifically —
+1. The jitter is caused by something in the mpv `--vo=drm`+`zimg` pipeline interacting badly with this board → Kodi's different GBM rendering path might sidestep it, same hope as the Pi4 case.
+2. The jitter is a genuine hardware-level (SDRAM/memory-bandwidth) margin problem on this specific board → Kodi would very likely reproduce the *same* jitter, just via a different code path, since a different renderer can't fix a genuine memory-timing problem.
+
+Either result is informative: a clean result under Kodi would reframe the whole MFG_VER/SDRAM-batch narrative built up over this project's history; the same jitter under a completely different software stack would be strong, independent confirmation it really is that board's hardware, not the render pipeline.
+
+**Architecturally sound to mix stacks**: the sync protocol (`server.py` broadcasting a timestamp+duration formula) doesn't require identical player software on every node — each client just needs to compute its own target position and correct *its own* player against it. A Kodi-flavored counterpart to `client.py` (using Kodi's JSON-RPC `Player.*` methods instead of mpv's IPC `set_property speed`/`time-pos`) would need building — this doesn't exist yet and hasn't been scoped. mpv's IPC has a specific "smooth speed nudge without an audible pitch shift" trick this project relies on for drift correction; check whether Kodi's JSON-RPC exposes an equivalent (a playback-speed control that doesn't require a hard seek) before assuming this is a drop-in swap.
+
+**Not yet started** — this is a plan, not a result. Next concrete steps for a fresh session: (1) install Kodi standalone/GBM on pi2 per the recipe above, (2) get a comparable test file onto it, (3) run the same `mistimed-frame-count`-equivalent measurement (Kodi doesn't have this exact mpv property — need to find Kodi's own equivalent diagnostic, likely via its debug/OSD render-stats overlay or logging), (4) only then decide whether to build the Kodi-flavored sync client.
 
 ---
 
