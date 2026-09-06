@@ -1,0 +1,36 @@
+[Unit]
+Description=Kodi Standalone (GBM) — persistent player controlled via JSON-RPC
+After=multi-user.target
+
+[Service]
+Type=simple
+User=pipe
+# Kodi is a persistent app here, unlike mpv — client.py --player kodi never
+# spawns/kills it, it only talks to this already-running instance over
+# JSON-RPC (localhost:8080). See controller/client.py's KodiRPC class.
+#
+# XDG_RUNTIME_DIR must be set explicitly for the same reason as
+# standalone-video.service: a plain system service doesn't get it from
+# pam_systemd the way a real login session does, and PipeWire needs it to
+# find the user's socket at /run/user/<uid>/pipewire-0. Verify pipe's UID
+# with `id pipe` if this is ever not 1000.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/bin/kodi --standalone
+# Kodi signals power actions (Powerdown()/Reboot() builtins, e.g. via a
+# power-button keymap) by exiting with a specific code — it does not call
+# systemctl itself, it expects an external supervisor to. Without this,
+# Restart=on-failure just relaunches Kodi instantly on a "powerdown" exit,
+# looking like a reboot loop while the system never actually changes power
+# state. See scripts/kodi-power-handler.sh for the exit-code meanings.
+# "+" prefix: run this one hook as root regardless of User=pipe above — a
+# bare service user has no real logind seat/session, so polkit refuses
+# `systemctl poweroff`/`reboot` non-interactively ("Interactive
+# authentication required") without this.
+ExecStopPost=+/home/pipe/pi-video-sync/scripts/kodi-power-handler.sh
+RestartPreventExitStatus=64 66
+Restart=on-failure
+RestartSec=2
+SupplementaryGroups=video render
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+<keymap>
+  <!-- Kodi's default keymap (system/keymaps/keyboard.xml) binds the power key
+       to ActivateWindow(ShutdownMenu) — a menu requiring Up/Down/Select to
+       choose an option. pi2's physical power switch is a bare gpio-keys
+       "pwr_button" device with no other input (no remote, no keyboard), so
+       that menu can never actually be confirmed — the button just shows an
+       unusable prompt forever. Override to execute the configured
+       powermanagement.shutdownstate action directly, no menu. -->
+  <global>
+    <keyboard>
+      <power>Powerdown()</power>
+      <sleep>Powerdown()</sleep>
+    </keyboard>
+  </global>
+</keymap>

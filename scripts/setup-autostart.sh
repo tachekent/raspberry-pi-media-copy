@@ -31,6 +31,13 @@ SLAVE_IP=192.168.2.3
 GATEWAY_IP=192.168.2.1   # only used for internet access during setup/dev via a switch
 STATIC_IP=$([ "$ROLE" = "master" ] && echo "$MASTER_IP" || echo "$SLAVE_IP")
 
+# Wifi AP+client link (pi-video-ap/pi-video-client, SSID pi-sync-link) — a
+# genuine fallback network alongside the wired direct-connect, not just for
+# setup. Used below as a second chrony source so clock sync survives the
+# wired link going down. Set up separately via nmcli, not by this script.
+MASTER_WIFI_IP=192.168.3.2
+SLAVE_WIFI_IP=192.168.3.3
+
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SYSTEMD_DIR=/etc/systemd/system
 
@@ -81,9 +88,23 @@ EOF
     # Disable ptp4l if previously installed
     sudo systemctl disable --now ptp-master.service 2>/dev/null || true
 else
-    # Static IP, not pi1.local — see the networking section below.
+    # Static IPs, not pi1.local (mDNS) — avoids mDNS as a dependency/failure
+    # point, and avoids ambiguity about which of the master's two interfaces
+    # actually gets used (both happened unpredictably before this was pinned
+    # down, 2026-09-07). Wired kept as "prefer" so it wins whenever up; wifi
+    # is a genuine fallback source chrony can use on its own, not just a
+    # spare — confirmed working (offset stayed sub-ms, skew ~1.8ppm vs ~32ppm
+    # on the old minpoll 2/maxpoll 4 config) once tuned this way:
+    #   minpoll 0 (1s) instead of 2 (4s): more samples average out wifi's
+    #     jitter faster and let chrony react to drift faster.
+    #   maxpoll 3 (8s) instead of 4 (16s): keeps polling reasonably tight
+    #     even once "stable" — cheap on a private, low-traffic link.
+    #   xleave: removes NIC/driver timestamp asymmetry from the delay
+    #     measurement — matters more over wifi's variable queueing delay
+    #     than it did over the wired-only link this project started with.
     sudo tee /etc/chrony/conf.d/pi-video-sync.conf > /dev/null <<EOF
-server $MASTER_IP iburst prefer minpoll 2 maxpoll 4
+server $MASTER_IP iburst prefer minpoll 0 maxpoll 3 xleave
+server $MASTER_WIFI_IP iburst minpoll 0 maxpoll 3 xleave
 EOF
     # Disable the default internet pool so chrony syncs from master only.
     # chrony's 'prefer' keyword doesn't override a stratum gap — internet pool

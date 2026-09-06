@@ -252,7 +252,16 @@ class SyncServer:
         """Broadcast a message to all clients via UDP"""
         data = json.dumps(message).encode()
         for target in broadcast_targets():
-            self.udp_socket.sendto(data, (target, self.broadcast_port))
+            try:
+                self.udp_socket.sendto(data, (target, self.broadcast_port))
+            except OSError as e:
+                # e.g. "Network is unreachable" when this target's interface
+                # is down — a real, expected case with multiple broadcast
+                # targets. Skip it and keep trying the rest rather than
+                # losing every periodic sync broadcast (and the whole
+                # --sync-interval loop, if uncaught) to one unreachable
+                # target. See play.py's identical fix, same root cause.
+                print(f"Warning: broadcast to {target} failed: {e}")
 
     def play(
         self,

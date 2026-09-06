@@ -64,7 +64,17 @@ def broadcast_play(
     data = json.dumps(message).encode()
     for _ in range(3):
         for target in broadcast_targets():
-            sock.sendto(data, (target, port))
+            try:
+                sock.sendto(data, (target, port))
+            except OSError as e:
+                # e.g. "Network is unreachable" when this target's interface
+                # (eth0 or wlan0) is down — a real, expected case now that
+                # broadcast_targets() spans multiple interfaces. Skip it and
+                # keep trying the rest rather than losing the whole broadcast
+                # to one unreachable target (confirmed 2026-09-07: this used
+                # to kill the entire sync-autoplay.service on boot whenever
+                # eth0 was disconnected, even though wlan0 was fine).
+                print(f"Warning: broadcast to {target} failed: {e}")
         time.sleep(0.01)
 
     sock.close()
@@ -81,7 +91,17 @@ def broadcast_stop(port: int):
 
     for _ in range(3):
         for target in broadcast_targets():
-            sock.sendto(data, (target, port))
+            try:
+                sock.sendto(data, (target, port))
+            except OSError as e:
+                # e.g. "Network is unreachable" when this target's interface
+                # (eth0 or wlan0) is down — a real, expected case now that
+                # broadcast_targets() spans multiple interfaces. Skip it and
+                # keep trying the rest rather than losing the whole broadcast
+                # to one unreachable target (confirmed 2026-09-07: this used
+                # to kill the entire sync-autoplay.service on boot whenever
+                # eth0 was disconnected, even though wlan0 was fine).
+                print(f"Warning: broadcast to {target} failed: {e}")
         time.sleep(0.01)
 
     sock.close()
@@ -110,7 +130,10 @@ def broadcast_sync(
 
     data = json.dumps(message).encode()
     for target in broadcast_targets():
-        sock.sendto(data, (target, port))
+        try:
+            sock.sendto(data, (target, port))
+        except OSError as e:
+            print(f"Warning: broadcast to {target} failed: {e}")
     sock.close()
     print("Sync command sent.")
 

@@ -18,6 +18,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -152,6 +153,122 @@ class MpvIPC:
         return None
 
 
+class KodiRPC:
+    """Interface to Kodi's JSON-RPC HTTP API.
+
+    Unlike mpv, Kodi is a persistent, always-running app (started once by its
+    own systemd service, not spawned per-play) — this class only ever talks
+    to an already-running Kodi over HTTP, it never starts/stops the process.
+
+    No fractional speed control exists in Kodi's JSON-RPC API — Player.SetSpeed
+    only accepts integer powers of two (1, 2, 4, ... and negatives), confirmed
+    via JSONRPC.Introspect on 2026-09-06. So there is no equivalent of mpv's
+    smooth sub-percent speed nudge here: drift correction for Kodi is
+    hard-seek-only (see SyncClient._handle_sync). A 5-minute uncorrected
+    baseline measurement on pi2 showed Kodi's own playback stays bounded
+    within roughly -150ms/+50ms on its own (oscillating, not a steady creep
+    like mpv boards show) — so hard-seek corrections are expected to be rare
+    in practice, not constant.
+    """
+
+    def __init__(self, host: str = 'localhost', port: int = 8080):
+        self.base_url = f'http://{host}:{port}/jsonrpc'
+        self._request_id = 0
+        self._playerid: Optional[int] = None
+
+    def _call(self, method: str, params: Optional[dict] = None) -> Optional[object]:
+        self._request_id += 1
+        payload = {'jsonrpc': '2.0', 'method': method, 'id': self._request_id}
+        if params is not None:
+            payload['params'] = params
+        try:
+            req = urllib.request.Request(
+                self.base_url,
+                data=json.dumps(payload).encode(),
+                headers={'Content-Type': 'application/json'},
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                data = json.loads(resp.read().decode())
+            if 'error' in data:
+                return None
+            return data.get('result')
+        except Exception:
+            return None
+
+    def _get_playerid(self) -> Optional[int]:
+        """Re-queried on every call rather than cached — the active player's
+        id can change (e.g. after Player.Open on a fresh item)."""
+        players = self._call('Player.GetActivePlayers')
+        if players:
+            self._playerid = players[0]['playerid']
+            return self._playerid
+        self._playerid = None
+        return None
+
+    def is_playing(self) -> bool:
+        return self._get_playerid() is not None
+
+    def open(self, path: str) -> bool:
+        return self._call('Player.Open', {'item': {'file': path}}) is not None
+
+    def stop(self):
+        pid = self._get_playerid()
+        if pid is not None:
+            self._call('Player.Stop', {'playerid': pid})
+
+    def set_repeat(self, mode: str = 'all'):
+        pid = self._get_playerid()
+        if pid is not None:
+            self._call('Player.SetRepeat', {'playerid': pid, 'repeat': mode})
+
+    @staticmethod
+    def _time_to_seconds(t: dict) -> float:
+        return t['hours'] * 3600 + t['minutes'] * 60 + t['seconds'] + t['milliseconds'] / 1000.0
+
+    def get_position(self) -> Optional[float]:
+        pid = self._get_playerid()
+        if pid is None:
+            return None
+        result = self._call('Player.GetProperties', {'playerid': pid, 'properties': ['time']})
+        if not result or 'time' not in result:
+            return None
+        return self._time_to_seconds(result['time'])
+
+    def get_duration(self) -> Optional[float]:
+        pid = self._get_playerid()
+        if pid is None:
+            return None
+        result = self._call('Player.GetProperties', {'playerid': pid, 'properties': ['totaltime']})
+        if not result or 'totaltime' not in result:
+            return None
+        return self._time_to_seconds(result['totaltime'])
+
+    def seek(self, position: float) -> float:
+        """Seek to exact position. Returns the real wall-clock seconds the
+        seek took to complete — mirrors MpvIPC.seek's latency-compensation
+        contract, though Kodi's Player.Seek response doesn't distinguish
+        'queued' from 'landed' the way mpv's 'seeking' property does, so this
+        is a coarser estimate (round-trip time of the call itself)."""
+        pid = self._get_playerid()
+        if pid is None:
+            return 0.0
+        if position < 0:
+            position = 0.0
+        hours = int(position // 3600)
+        minutes = int((position % 3600) // 60)
+        seconds = int(position % 60)
+        milliseconds = int(round((position - int(position)) * 1000))
+        t_start = time.time()
+        self._call('Player.Seek', {
+            'playerid': pid,
+            'value': {'time': {
+                'hours': hours, 'minutes': minutes,
+                'seconds': seconds, 'milliseconds': milliseconds,
+            }},
+        })
+        return time.time() - t_start
+
+
 class SyncClient:
     def __init__(
         self,
@@ -162,6 +279,11 @@ class SyncClient:
         player: str = 'mpv',
         drift_threshold: float = 0.03,  # 30ms default
         hard_seek_threshold: float = 0.5,  # 500ms — above this, jump instead of nudging speed
+        kodi_host: str = 'localhost',
+        kodi_port: int = 8080,
+        kodi_seek_threshold: float = 0.6,  # 600ms — see KodiRPC docstring: must sit above Kodi's
+        # own natural, uncorrected drift band (measured ~200-390ms on pi2) or every cycle
+        # triggers a seek whose own latency noise exceeds the drift it's meant to fix.
     ):
         self.server_host = server_host
         self.server_port = server_port
@@ -170,6 +292,9 @@ class SyncClient:
         self.player = player
         self.drift_threshold = drift_threshold
         self.hard_seek_threshold = hard_seek_threshold
+        self.kodi_host = kodi_host
+        self.kodi_port = kodi_port
+        self.kodi_seek_threshold = kodi_seek_threshold
         # Speed-nudge tuning: cap how far speed deviates from 1.0 (imperceptible
         # on video with no audio track) and aim to close a gap over roughly this
         # many seconds — longer than the sync interval so corrections converge
@@ -191,14 +316,24 @@ class SyncClient:
         self._play_generation = 0
 
         # Running estimate (EWMA) of hr-seek latency — the real wall-clock time a
-        # correction seek takes to land. Starts at 0 and self-calibrates from
-        # measured seeks (see _handle_sync), so it adapts to content/hardware
-        # without needing a hardcoded value.
-        self.seek_latency_estimate = 0.0
+        # correction seek takes to land. Self-calibrates from measured seeks (see
+        # _handle_sync) so it adapts to content/hardware, but starts at a small
+        # non-zero default rather than 0 — a 0 start means the very first correction
+        # (typically the startup catch-up seek) lands short by its own uncompensated
+        # latency, and for a player with a high correction threshold (Kodi: no
+        # speed-nudge tier, 0.6s default) that undershoot may never get revisited
+        # since nothing ever exceeds the threshold again. Confirmed live 2026-09-07:
+        # pi2 (Kodi) sat ~250ms behind pi1 indefinitely after its one startup seek,
+        # visible as a persistent gap between the two Pis' timecode overlays.
+        self.seek_latency_estimate = 0.15
 
         # mpv IPC for position control
         self.ipc_socket_path = f'/tmp/mpv-sync-{os.getpid()}.sock'
         self.mpv_ipc: Optional[MpvIPC] = None
+
+        # Kodi JSON-RPC for position control (Kodi runs persistently via its
+        # own systemd service — this just talks to it, never spawns/kills it)
+        self.kodi_rpc: Optional[KodiRPC] = None
 
         # TCP socket for server registration
         self.tcp_socket = None
@@ -343,7 +478,14 @@ class SyncClient:
         duration = message.get('duration') or self.duration  # fall back to locally stored value
 
         # If we're not playing anything, start playback
-        if not self.player_process or self.player_process.poll() is not None:
+        if self.player == 'kodi':
+            if self.kodi_rpc is None:
+                self.kodi_rpc = KodiRPC(self.kodi_host, self.kodi_port)
+            currently_playing = self.kodi_rpc.is_playing()
+        else:
+            currently_playing = self.player_process and self.player_process.poll() is None
+
+        if not currently_playing:
             print(f"Sync: Not playing, starting {video}")
             self.current_video = video
             self.start_time = start_time
@@ -362,7 +504,10 @@ class SyncClient:
             self._start_at_position(video, start_time, loop, duration)
             return
 
-        # Check position drift (mpv only)
+        # Check position drift
+        if self.player == 'kodi':
+            self._handle_kodi_drift(start_time, loop, duration)
+            return
         if self.player != 'mpv':
             return
 
@@ -442,6 +587,39 @@ class SyncClient:
             # Within threshold — make sure we're not still running at a speed
             # adjusted by a previous correction.
             self.mpv_ipc.set_speed(1.0)
+
+    def _handle_kodi_drift(self, start_time: float, loop: bool, duration: Optional[float]):
+        """Drift correction for Kodi — hard-seek only, no speed-nudge tier.
+
+        Kodi's JSON-RPC Player.SetSpeed only accepts integer powers of two
+        (confirmed via JSONRPC.Introspect), so mpv's smooth sub-percent nudge
+        has no equivalent here. A 5-minute uncorrected baseline on pi2 showed
+        Kodi's own playback oscillating within roughly -150ms/+50ms on its
+        own rather than creeping steadily, so kodi_seek_threshold is set
+        higher than mpv's drift_threshold — corrections are expected to be an
+        occasional safety net, not routine.
+        """
+        if self.kodi_rpc is None:
+            self.kodi_rpc = KodiRPC(self.kodi_host, self.kodi_port)
+
+        now = time.time()
+        expected_pos = now - start_time
+        if loop and duration and duration > 0:
+            expected_pos = expected_pos % duration
+
+        actual_pos = self.kodi_rpc.get_position()
+        if actual_pos is None:
+            return
+
+        drift = actual_pos - expected_pos
+        if abs(drift) > self.kodi_seek_threshold:
+            target = expected_pos + self.seek_latency_estimate
+            if loop and duration and duration > 0:
+                target = target % duration
+            print(f"Sync (kodi): Drift {drift*1000:.1f}ms exceeds threshold, seeking to {target:.3f}s "
+                  f"(latency est: {self.seek_latency_estimate*1000:.1f}ms)")
+            latency = self.kodi_rpc.seek(target)
+            self.seek_latency_estimate = 0.7 * self.seek_latency_estimate + 0.3 * latency
 
     def _start_at_position(self, video: str, start_time: float, loop: bool, duration: float = None):
         """Start playback at the correct position for sync"""
@@ -566,6 +744,17 @@ class SyncClient:
                 cmd.extend(['-ss', str(start_position)])
             cmd.append(video)
 
+        elif self.player == 'kodi':
+            # Kodi is a persistent app (its own systemd service) — command the
+            # already-running instance over JSON-RPC instead of spawning a process.
+            if self.kodi_rpc is None:
+                self.kodi_rpc = KodiRPC(self.kodi_host, self.kodi_port)
+            self.kodi_rpc.open(video)
+            threading.Thread(
+                target=self._finish_kodi_play, args=(loop, start_position), daemon=True
+            ).start()
+            return
+
         else:
             print(f"Unknown player: {self.player}")
             return
@@ -609,8 +798,36 @@ class SyncClient:
         print("Warning: Could not connect to mpv IPC after 15s")
         self.mpv_ipc = None
 
+    def _finish_kodi_play(self, loop: bool, start_position: Optional[float]):
+        """Wait for Player.Open to actually start playback, then set repeat
+        mode and seek to the initial sync position (called in background
+        thread — Player.Open returns before Kodi has necessarily started)."""
+        for _ in range(150):  # up to 15s, same budget as _connect_mpv_ipc
+            if self.kodi_rpc.is_playing():
+                break
+            time.sleep(0.1)
+        else:
+            print("Warning: Kodi did not start playback after Player.Open")
+            return
+
+        if loop:
+            self.kodi_rpc.set_repeat('all')
+
+        if self.duration is None:
+            self.duration = self.kodi_rpc.get_duration()
+            if self.duration:
+                print(f"Video duration: {self.duration:.2f}s")
+
+        if start_position is not None and start_position > 0:
+            self.kodi_rpc.seek(start_position)
+
     def stop_playback(self):
         """Stop current playback"""
+        if self.player == 'kodi':
+            if self.kodi_rpc:
+                self.kodi_rpc.stop()
+            return
+
         # Disconnect IPC
         if self.mpv_ipc:
             self.mpv_ipc.disconnect()
@@ -646,13 +863,21 @@ def main():
                         help='UDP broadcast port (default: 5001)')
     parser.add_argument('--id', type=str, default=None,
                         help='Client ID (default: hostname)')
-    parser.add_argument('--player', choices=['mpv', 'ffplay'], default='mpv',
+    parser.add_argument('--player', choices=['mpv', 'ffplay', 'kodi'], default='mpv',
                         help='Video player to use (default: mpv)')
     parser.add_argument('--drift-threshold', type=float, default=0.03,
-                        help='Max drift in seconds before correcting (default: 0.03 = 30ms)')
+                        help='Max drift in seconds before correcting (default: 0.03 = 30ms, mpv only)')
     parser.add_argument('--hard-seek-threshold', type=float, default=0.5,
                         help='Drift in seconds above which to jump instead of nudging '
-                             'speed (default: 0.5 = 500ms)')
+                             'speed (default: 0.5 = 500ms, mpv only)')
+    parser.add_argument('--kodi-host', type=str, default='localhost',
+                        help='Kodi JSON-RPC host (default: localhost)')
+    parser.add_argument('--kodi-port', type=int, default=8080,
+                        help='Kodi JSON-RPC port (default: 8080)')
+    parser.add_argument('--kodi-seek-threshold', type=float, default=0.6,
+                        help='Drift in seconds above which to hard-seek — Kodi has no '
+                             'speed-nudge tier, so this is its only threshold. Must sit above '
+                             "Kodi's own natural uncorrected drift band (default: 0.6 = 600ms)")
     args = parser.parse_args()
 
     client = SyncClient(
@@ -663,6 +888,9 @@ def main():
         player=args.player,
         drift_threshold=args.drift_threshold,
         hard_seek_threshold=args.hard_seek_threshold,
+        kodi_host=args.kodi_host,
+        kodi_port=args.kodi_port,
+        kodi_seek_threshold=args.kodi_seek_threshold,
     )
 
     try:

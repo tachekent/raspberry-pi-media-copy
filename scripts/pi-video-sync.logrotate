@@ -1,0 +1,21 @@
+# logrotate config for pi-video-sync's logs/ directory.
+# Deploy to /etc/logrotate.d/pi-video-sync on each Pi.
+#
+# client.log and mpv.log are append-only (controller/client.py opens them
+# with '>>', autostart-client.sh redirects with '>>') and were never rotated
+# at all — client.log had grown to 8500+ lines / 640KB+ spanning weeks of
+# history before this was noticed (2026-09-07). copytruncate is required,
+# not the default rename+recreate: client.py and mpv hold these files open
+# for the life of the process (mpv via --log-file, client.py's own prints),
+# so a rename would leave them writing to a now-unlinked file forever until
+# next restart — copytruncate truncates the file in place instead.
+/home/pipe/pi-video-sync/logs/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su pipe pipe
+}

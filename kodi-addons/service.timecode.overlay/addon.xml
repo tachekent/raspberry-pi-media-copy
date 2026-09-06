@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="service.timecode.overlay" name="Timecode Overlay" version="1.0.0" provider-name="pi-video-sync">
+  <requires>
+    <import addon="xbmc.python" version="3.0.1"/>
+  </requires>
+  <extension point="xbmc.service" library="service.py" start="startup"/>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en_GB">Persistent HH:MM:SS.mmm timecode overlay for cross-Pi sync checking</summary>
+    <description lang="en_GB">Kodi equivalent of this project's mpv SYNC_OVERLAY: shows the current playback position at millisecond precision, always on screen, no auto-hide. No frame counter (Kodi has no native frame-position API) — milliseconds serve the same "do these two Pis look in sync" purpose.</description>
+    <platform>all</platform>
+  </extension>
+</addon>
