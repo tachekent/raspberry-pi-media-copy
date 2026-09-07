@@ -1,13 +1,19 @@
 [Unit]
-Description=Reconnect to paired Bluetooth audio device (best-effort, doesn't block playback)
+Description=Keep paired Bluetooth audio device reconnected (best-effort, doesn't block playback)
 After=bluetooth.service
 Wants=bluetooth.service
 
 [Service]
-Type=oneshot
+# Persistent watcher, not a one-shot boot trigger — a oneshot only ever
+# handles "device wasn't connected when the Pi booted", not "device was
+# turned off and back on again while the Pi kept running", which is the
+# far more common real case for something like a soundbar.
+Type=simple
 User=pipe
 WorkingDirectory=/home/pipe/pi-video-sync
 ExecStart=/home/pipe/pi-video-sync/scripts/bluetooth-reconnect.sh
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
