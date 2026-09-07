@@ -8,10 +8,17 @@
 set -u
 
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-set -a; source "$INSTALL_DIR/standalone.env" 2>/dev/null || true; set +a
+# standalone.env on a standalone Pi (pi3's original setup); config.env on a
+# sync-fleet Pi (pi1/pi2) — BLUETOOTH_MAC can live in whichever this board
+# actually uses. Both are sourced (harmless if one doesn't exist) so this
+# script works unmodified on either kind of deployment.
+set -a
+source "$INSTALL_DIR/standalone.env" 2>/dev/null || true
+source "$INSTALL_DIR/config.env" 2>/dev/null || true
+set +a
 
 if [ -z "${BLUETOOTH_MAC:-}" ]; then
-    echo "BLUETOOTH_MAC not set in standalone.env — nothing to reconnect."
+    echo "BLUETOOTH_MAC not set in standalone.env or config.env — nothing to reconnect."
     exit 0
 fi
 
