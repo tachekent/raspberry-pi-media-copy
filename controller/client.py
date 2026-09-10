@@ -482,6 +482,17 @@ class SyncClient:
             if self.kodi_rpc is None:
                 self.kodi_rpc = KodiRPC(self.kodi_host, self.kodi_port)
             currently_playing = self.kodi_rpc.is_playing()
+            if not currently_playing:
+                # Kodi's own repeat=all loop briefly reports no active player
+                # while it tears down and recreates the player instance
+                # between loop iterations. A single check here mistook that
+                # for "stopped" and re-issued Player.Open — pointlessly
+                # re-triggering Kodi's file-analysis "Scanning" toast on a
+                # file that was already looping fine on its own (2026-09-10).
+                # One short recheck filters this out without meaningfully
+                # delaying a real stop/crash recovery.
+                time.sleep(0.3)
+                currently_playing = self.kodi_rpc.is_playing()
         else:
             currently_playing = self.player_process and self.player_process.poll() is None
 
